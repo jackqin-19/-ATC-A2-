@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS a2_task_realtime_cfg (
     heart_beat INTEGER DEFAULT 10,
     icao_code TEXT,
     band TEXT,
+    source_url TEXT,
+    segment_seconds INTEGER DEFAULT 60,
+    stream_format TEXT,
     status INTEGER DEFAULT 0,
     create_time TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -102,10 +105,22 @@ def ensure_dirs() -> None:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    existing_columns = {
+        row[1]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in existing_columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db() -> None:
     ensure_dirs()
     with sqlite3.connect(settings.db_path) as conn:
         conn.executescript(SCHEMA_SQL)
+        ensure_column(conn, "a2_task_realtime_cfg", "source_url", "TEXT")
+        ensure_column(conn, "a2_task_realtime_cfg", "segment_seconds", "INTEGER DEFAULT 60")
+        ensure_column(conn, "a2_task_realtime_cfg", "stream_format", "TEXT")
         conn.execute(
             """
             INSERT INTO a2_sys_base_cfg (

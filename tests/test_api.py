@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import io
 import math
+import sqlite3
 import shutil
 import struct
+import subprocess
+import threading
+import time
 import unittest
 import wave
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -28,6 +34,86 @@ def build_wav_bytes(seconds: int, freq: float) -> bytes:
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(b"".join(frames))
     return buffer.getvalue()
+
+
+def build_mp3_bytes(seconds: int) -> bytes:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise unittest.SkipTest("ffmpeg not available")
+    temp_root = Path.cwd() / "test_artifacts" / "mp3_bytes"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    output_path = temp_root / f"fixture_{seconds}.mp3"
+    try:
+        subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=8000:cl=mono",
+                "-t",
+                str(seconds),
+                "-q:a",
+                "9",
+                "-acodec",
+                "libmp3lame",
+                str(output_path),
+            ],
+            check=True,
+                capture_output=True,
+            )
+        return output_path.read_bytes()
+    finally:
+        if output_path.exists():
+            output_path.unlink()
+
+
+class StreamingFixtureHandler(BaseHTTPRequestHandler):
+    server_version = "A2TestHTTP/1.0"
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/live.asx":
+            body = self.server.asx_body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "video/x-ms-asf")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if self.path == "/stream.mp3":
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.end_headers()
+            for chunk in self.server.stream_chunks:
+                self.wfile.write(chunk)
+                self.wfile.flush()
+                time.sleep(self.server.chunk_delay)
+            return
+
+        if self.path == self.server.archive_path:
+            body = self.server.archive_bytes
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format: str, *args) -> None:  # noqa: A003
+        return
+
+
+class StreamingFixtureServer(ThreadingHTTPServer):
+    asx_body: str
+    stream_chunks: list[bytes]
+    chunk_delay: float
+    archive_path: str
+    archive_bytes: bytes
 
 
 class A2ApiTestCase(unittest.TestCase):
@@ -60,6 +146,23 @@ class A2ApiTestCase(unittest.TestCase):
             object.__setattr__(settings, key, value)
         if self.root.exists():
             shutil.rmtree(self.root, ignore_errors=True)
+
+    def start_stream_server(self) -> tuple[StreamingFixtureServer, threading.Thread]:
+        server = StreamingFixtureServer(("127.0.0.1", 0), StreamingFixtureHandler)
+        server.stream_chunks = [b"MP3DATA" * 256 for _ in range(4)]
+        server.chunk_delay = 0.6
+        server.archive_path = "/VHHH9-Del-Gnd-Twr-Dir-Apr-14-2026-0000Z.mp3"
+        server.archive_bytes = build_mp3_bytes(2)
+        port = server.server_address[1]
+        server.asx_body = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<asx version=\"3.0\"><entry>"
+            f"<ref href=\"http://127.0.0.1:{port}/stream.mp3\" />"
+            "</entry></asx>"
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, thread
 
     def test_health_endpoint(self) -> None:
         response = self.client.get("/health")
@@ -157,6 +260,59 @@ class A2ApiTestCase(unittest.TestCase):
             duration = wav_file.getnframes() / wav_file.getframerate()
         self.assertAlmostEqual(duration, 6.0, places=1)
 
+    def test_export_endpoint_returns_wav_content_and_cleans_temp_slice(self) -> None:
+        service = DownloadTaskService()
+        task_id = service.create_task(
+            DownloadTaskCreate(
+                task_name="export-api-task",
+                icao_code="ZBAA",
+                band="tower",
+                start_time="2026-04-06 10:00:00",
+                end_time="2026-04-06 10:00:10",
+            )
+        )
+
+        fixture_1 = self.root / "export_1.wav"
+        fixture_2 = self.root / "export_2.wav"
+        fixture_1.write_bytes(build_wav_bytes(5, 440.0))
+        fixture_2.write_bytes(build_wav_bytes(5, 660.0))
+        service.ingest_downloaded_file(
+            task_id=task_id,
+            source_file=fixture_1,
+            icao_code="ZBAA",
+            band="tower",
+            start_at="2026-04-06 10:00:00",
+            end_at="2026-04-06 10:00:05",
+            original_time="2026-04-06 10:00:00",
+        )
+        service.ingest_downloaded_file(
+            task_id=task_id,
+            source_file=fixture_2,
+            icao_code="ZBAA",
+            band="tower",
+            start_at="2026-04-06 10:00:05",
+            end_at="2026-04-06 10:00:10",
+            original_time="2026-04-06 10:00:05",
+        )
+
+        response = self.client.get(
+            "/api/a2/voice/export",
+            params={
+                "startTime": "2026-04-06 10:00:02",
+                "endTime": "2026-04-06 10:00:08",
+                "icaoCode": "ZBAA",
+                "band": "tower",
+                "outputFormat": "wav",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("ZBAA_tower_2026-04-06_100002_2026-04-06_100008.wav", response.headers["content-disposition"])
+        with wave.open(io.BytesIO(response.content), "rb") as wav_file:
+            duration = wav_file.getnframes() / wav_file.getframerate()
+        self.assertAlmostEqual(duration, 6.0, places=1)
+        temp_files = list(settings.temp_root.rglob("slice_*"))
+        self.assertEqual(temp_files, [])
+
     def test_sync_endpoint_reports_missing_file(self) -> None:
         service = DownloadTaskService()
         task_id = service.create_task(
@@ -184,6 +340,258 @@ class A2ApiTestCase(unittest.TestCase):
         response = self.client.post("/api/a2/sync/run")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["data"]["missing"], 1)
+
+    def test_file_endpoint_reports_missing_physical_file(self) -> None:
+        service = DownloadTaskService()
+        task_id = service.create_task(
+            DownloadTaskCreate(
+                task_name="missing-file-api-task",
+                icao_code="ZGGG",
+                band="tower",
+                start_time="2026-04-06 12:00:00",
+                end_time="2026-04-06 12:00:02",
+            )
+        )
+        fixture = self.root / "missing.wav"
+        fixture.write_bytes(build_wav_bytes(2, 500.0))
+        record = service.ingest_downloaded_file(
+            task_id=task_id,
+            source_file=fixture,
+            icao_code="ZGGG",
+            band="tower",
+            start_at="2026-04-06 12:00:00",
+            end_at="2026-04-06 12:00:02",
+            original_time="2026-04-06 12:00:00",
+        )
+        Path(record["file_path"]).unlink()
+
+        response = self.client.get(f"/api/a2/voice/file/{record['unique_id']}")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "voice file missing on disk")
+
+    def test_import_history_endpoint_cleans_temp_upload(self) -> None:
+        task_response = self.client.post(
+            "/api/a2/tasks/download",
+            json={
+                "task_name": "cleanup-history-task",
+                "icao_code": "ZBAA",
+                "band": "tower",
+                "start_time": "2026-04-06 10:00:00",
+                "end_time": "2026-04-06 10:00:05",
+            },
+        )
+        self.assertEqual(task_response.status_code, 200)
+        task_id = task_response.json()["data"]["taskId"]
+
+        response = self.client.post(
+            (
+                f"/api/a2/voice/import/history?taskId={task_id}&icaoCode=ZBAA&band=tower"
+                "&startAt=2026-04-06%2010:00:00&endAt=2026-04-06%2010:00:05"
+                "&originalTime=2026-04-06%2010:00:00"
+            ),
+            files={"file": ("segment.wav", build_wav_bytes(5, 440.0), "audio/wav")},
+        )
+        self.assertEqual(response.status_code, 200)
+        temp_entries = list(settings.temp_root.rglob("*"))
+        self.assertEqual([entry for entry in temp_entries if entry.is_file()], [])
+
+    def test_import_liveatc_history_file_without_manual_metadata(self) -> None:
+        response = self.client.post(
+            "/api/a2/voice/import/history/liveatc",
+            files={
+                "file": (
+                    "VHHH9-Del-Gnd-Twr-Dir-Apr-14-2026-0000Z.mp3",
+                    build_mp3_bytes(2),
+                    "audio/mpeg",
+                )
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]
+        self.assertEqual(payload["icao_code"], "VHHH")
+        self.assertEqual(payload["band"], "del-gnd-twr-dir")
+        self.assertEqual(payload["start_at"], "2026-04-14 00:00:00")
+        self.assertEqual(payload["end_at"], "2026-04-14 00:00:02")
+
+    def test_execute_liveatc_download_persists_file_and_supports_time_range_query(self) -> None:
+        server, thread = self.start_stream_server()
+        try:
+            response = self.client.post(
+                "/api/a2/tasks/download/liveatc/execute",
+                json={"source_url": f"http://127.0.0.1:{server.server_address[1]}{server.archive_path}"},
+            )
+            self.assertEqual(response.status_code, 200)
+
+            payload = response.json()["data"]
+            record = payload["record"]
+            stored_path = Path(record["file_path"])
+            self.assertTrue(stored_path.exists())
+            self.assertIn(str(self.root / "data" / "VHHH" / "del-gnd-twr-dir" / "2026-04-14"), str(stored_path))
+            self.assertEqual(record["start_at"], "2026-04-14 00:00:00")
+            self.assertEqual(record["end_at"], "2026-04-14 00:00:02")
+
+            with sqlite3.connect(settings.db_path) as conn:
+                row = conn.execute(
+                    "SELECT progress, status, start_time, end_time FROM a2_task_download_cfg WHERE task_id = ?",
+                    (payload["taskId"],),
+                ).fetchone()
+            self.assertEqual(row[0], 100.0)
+            self.assertEqual(row[1], 1)
+            self.assertEqual(row[2], "2026-04-14 00:00:00")
+            self.assertEqual(row[3], "2026-04-14 00:00:02")
+
+            query_response = self.client.get(
+                "/api/a2/voice/query",
+                params={
+                    "startTime": "2026-04-14 00:00:01",
+                    "endTime": "2026-04-14 00:00:03",
+                    "icaoCode": "VHHH",
+                    "band": "del-gnd-twr-dir",
+                    "pageNum": 1,
+                    "pageSize": 10,
+                },
+            )
+            self.assertEqual(query_response.status_code, 200)
+            query_payload = query_response.json()
+            self.assertEqual(query_payload["count"], 1)
+            self.assertEqual(query_payload["data"][0]["downloadUrl"], f"/api/a2/voice/file/{record['unique_id']}")
+
+            file_response = self.client.get(query_payload["data"][0]["downloadUrl"])
+            self.assertEqual(file_response.status_code, 200)
+            self.assertGreater(len(file_response.content), 0)
+            download_dir = settings.temp_root / "downloads"
+            remaining = [entry for entry in download_dir.rglob("*") if entry.is_file()] if download_dir.exists() else []
+            self.assertEqual(remaining, [])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_import_liveatc_history_file_truncates_to_first_30_minutes(self) -> None:
+        response = self.client.post(
+            "/api/a2/voice/import/history/liveatc",
+            files={
+                "file": (
+                    "VHHH9-Del-Gnd-Twr-Dir-Apr-14-2026-0000Z.mp3",
+                    build_mp3_bytes(1805),
+                    "audio/mpeg",
+                )
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]
+        self.assertEqual(payload["start_at"], "2026-04-14 00:00:00")
+        self.assertEqual(payload["end_at"], "2026-04-14 00:30:00")
+        stored_duration = DownloadTaskService._probe_audio_duration_seconds(Path(payload["file_path"]))
+        self.assertIsNotNone(stored_duration)
+        self.assertLessEqual(stored_duration, 1800)
+        self.assertGreaterEqual(stored_duration, 1798)
+
+    def test_sync_endpoint_repairs_stale_metadata(self) -> None:
+        response = self.client.post(
+            "/api/a2/voice/import/history/liveatc",
+            files={
+                "file": (
+                    "VHHH9-Del-Gnd-Twr-Dir-Apr-14-2026-0000Z.mp3",
+                    build_mp3_bytes(2),
+                    "audio/mpeg",
+                )
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]
+
+        with sqlite3.connect(settings.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE a2_voice_info
+                SET file_size = ?, checksum = ?, valid_status = ?
+                WHERE unique_id = ?
+                """,
+                (1, "stale-checksum", "invalid", payload["unique_id"]),
+            )
+            conn.commit()
+
+        sync_response = self.client.post("/api/a2/sync/run")
+        self.assertEqual(sync_response.status_code, 200)
+        sync_payload = sync_response.json()["data"]
+        self.assertEqual(sync_payload["missing"], 0)
+        self.assertGreaterEqual(sync_payload["updated"], 1)
+
+        with sqlite3.connect(settings.db_path) as conn:
+            row = conn.execute(
+                "SELECT file_size, checksum, valid_status FROM a2_voice_info WHERE unique_id = ?",
+                (payload["unique_id"],),
+            ).fetchone()
+        self.assertEqual(row[0], Path(payload["file_path"]).stat().st_size)
+        self.assertNotEqual(row[1], "stale-checksum")
+        self.assertEqual(row[2], "valid")
+
+    def test_create_task_from_asx_and_receive_stream_segments(self) -> None:
+        server, thread = self.start_stream_server()
+        try:
+            create_response = self.client.post(
+                "/api/a2/tasks/realtime/from-asx",
+                data={
+                    "taskName": "api-live-task",
+                    "icaoCode": "ZBAA",
+                    "band": "tower",
+                    "segmentSeconds": 1,
+                    "preferredRef": 0,
+                },
+                files={"file": ("live.asx", server.asx_body.encode("utf-8"), "video/x-ms-asf")},
+            )
+            self.assertEqual(create_response.status_code, 200)
+            task_id = create_response.json()["data"]["taskId"]
+
+            start_response = self.client.post(
+                "/api/a2/tasks/realtime/start-receive",
+                json={"task_id": task_id},
+            )
+            self.assertEqual(start_response.status_code, 200)
+
+            deadline = time.time() + 8
+            state_payload = {}
+            while time.time() < deadline:
+                state_response = self.client.get(f"/api/a2/tasks/realtime/{task_id}/state")
+                self.assertEqual(state_response.status_code, 200)
+                state_payload = state_response.json()["data"]
+                if state_payload["segmentsSaved"] >= 2 and not state_payload["receiving"]:
+                    break
+                time.sleep(0.2)
+
+            self.client.post(f"/api/a2/tasks/realtime/{task_id}/stop-receive")
+            self.assertGreaterEqual(state_payload.get("segmentsSaved", 0), 2)
+
+            start_time = (datetime.now(UTC) - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+            end_time = (datetime.now(UTC) + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+            query_response = self.client.get(
+                "/api/a2/voice/query",
+                params={
+                    "startTime": start_time,
+                    "endTime": end_time,
+                    "icaoCode": "ZBAA",
+                    "band": "tower",
+                    "pageNum": 1,
+                    "pageSize": 20,
+                },
+            )
+            self.assertEqual(query_response.status_code, 200)
+            payload = query_response.json()
+            self.assertGreaterEqual(payload["count"], 2)
+            self.assertTrue(all(row["data_type"] == "S" for row in payload["data"]))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_start_realtime_receive_reports_missing_task(self) -> None:
+        response = self.client.post(
+            "/api/a2/tasks/realtime/start-receive",
+            json={"task_id": 999},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "realtime task 999 not found")
 
 
 if __name__ == "__main__":

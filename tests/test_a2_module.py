@@ -4,6 +4,7 @@ import math
 import shutil
 import sqlite3
 import struct
+import subprocess
 import unittest
 import wave
 from pathlib import Path
@@ -11,11 +12,11 @@ from pathlib import Path
 from app.core.config import settings
 from app.db import init_db
 from app.repositories import VoiceRepository
-from app.schemas import DownloadExecuteRequest, DownloadTaskCreate, VoiceQueryRequest
+from app.schemas import DownloadExecuteRequest, DownloadTaskCreate, LiveAtcDownloadExecuteRequest, VoiceQueryRequest
 from app.services.audio_service import AudioService
 from app.services.query_service import QueryService
 from app.services.sync_service import MetadataSyncService
-from app.services.task_service import DownloadTaskService
+from app.services.task_service import DownloadTaskService, RealtimeTaskService
 
 
 def build_wav(path: Path, seconds: int, freq: float) -> None:
@@ -29,6 +30,31 @@ def build_wav(path: Path, seconds: int, freq: float) -> None:
         wav_file.setsampwidth(2)
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(b"".join(frames))
+
+
+def build_mp3(path: Path, seconds: int) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise unittest.SkipTest("ffmpeg not available")
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=8000:cl=mono",
+            "-t",
+            str(seconds),
+            "-q:a",
+            "9",
+            "-acodec",
+            "libmp3lame",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
 
 
 class A2ModuleTestCase(unittest.TestCase):
@@ -206,6 +232,47 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertEqual(row[0], 100.0)
         self.assertEqual(row[1], 1)
 
+    def test_parse_liveatc_archive_metadata_from_filename(self) -> None:
+        metadata = DownloadTaskService().parse_liveatc_archive_metadata(
+            "VHHH9-Del-Gnd-Twr-Dir-Apr-14-2026-0000Z.mp3"
+        )
+
+        self.assertEqual(metadata.icao_code, "VHHH")
+        self.assertEqual(metadata.band, "del-gnd-twr-dir")
+        self.assertEqual(metadata.start_at, "2026-04-14 00:00:00")
+        self.assertEqual(metadata.end_at, "2026-04-14 00:00:00")
+
+    def test_execute_liveatc_download_inferrs_metadata_from_file_name(self) -> None:
+        fixture = self.root / "VHHH5-App-Dep-Dir-Zone-Apr-09-2026-0630Z.mp3"
+        build_mp3(fixture, 2)
+
+        result = DownloadTaskService().execute_liveatc_download(
+            LiveAtcDownloadExecuteRequest(
+                source_url=fixture.resolve().as_uri(),
+            )
+        )
+
+        record = result["record"]
+        self.assertEqual(result["taskId"], 1)
+        self.assertEqual(record["icao_code"], "VHHH")
+        self.assertEqual(record["band"], "app-dep-dir-zone")
+        self.assertEqual(record["start_at"], "2026-04-09 06:30:00")
+        self.assertEqual(record["end_at"], "2026-04-09 06:30:02")
+        self.assertTrue(Path(record["file_path"]).exists())
+
+    def test_import_liveatc_archive_limits_metadata_and_file_to_30_minutes(self) -> None:
+        fixture = self.root / "VHHH5-App-Dep-Dir-Zone-Apr-09-2026-0630Z.mp3"
+        build_mp3(fixture, 1805)
+
+        record = DownloadTaskService().import_liveatc_archive_file(source_file=fixture)
+
+        self.assertEqual(record["start_at"], "2026-04-09 06:30:00")
+        self.assertEqual(record["end_at"], "2026-04-09 07:00:00")
+        stored_duration = DownloadTaskService._probe_audio_duration_seconds(Path(record["file_path"]))
+        self.assertIsNotNone(stored_duration)
+        self.assertLessEqual(stored_duration, 1800)
+        self.assertGreaterEqual(stored_duration, 1798)
+
     def test_metadata_sync_marks_missing_files(self) -> None:
         fixture = self.root / "sync.wav"
         build_wav(fixture, 2, 500.0)
@@ -236,6 +303,26 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertEqual(result["missing"], 1)
         self.assertIsNotNone(refreshed)
         self.assertEqual(refreshed["valid_status"], "missing")
+
+    def test_create_realtime_task_from_asx_extracts_stream_url(self) -> None:
+        result = RealtimeTaskService().create_task_from_asx(
+            task_name="live-stream-demo",
+            icao_code="ZBAA",
+            band="tower",
+            content=(
+                b'<?xml version="1.0" encoding="UTF-8"?>'
+                b"<asx version=\"3.0\"><entry><ref href=\"http://127.0.0.1/live.mp3\" />"
+                b"</entry></asx>"
+            ),
+            segment_seconds=15,
+        )
+
+        rows = RealtimeTaskService().list_tasks()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source_url"], "http://127.0.0.1/live.mp3")
+        self.assertEqual(rows[0]["segment_seconds"], 15)
+        self.assertEqual(result["streamUrl"], "http://127.0.0.1/live.mp3")
+        self.assertEqual(result["refs"], ["http://127.0.0.1/live.mp3"])
 
 
 if __name__ == "__main__":

@@ -149,8 +149,9 @@ class TaskRepository:
             cursor = conn.execute(
                 """
                 INSERT INTO a2_task_realtime_cfg (
-                    task_name, server_addr, server_port, protocol, timeout, heart_beat, icao_code, band, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    task_name, server_addr, server_port, protocol, timeout, heart_beat, icao_code, band,
+                    source_url, segment_seconds, stream_format, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     payload.task_name,
@@ -161,6 +162,9 @@ class TaskRepository:
                     payload.heart_beat,
                     payload.icao_code,
                     payload.band,
+                    payload.source_url,
+                    payload.segment_seconds,
+                    payload.stream_format,
                 ),
             )
             return int(cursor.lastrowid)
@@ -222,6 +226,17 @@ class TaskRepository:
                 WHERE task_id = ?
                 """,
                 (progress, resume_from, status, task_id),
+            )
+
+    def update_download_task_time_range(self, task_id: int, start_time: str, end_time: str) -> None:
+        with get_conn() as conn:
+            conn.execute(
+                """
+                UPDATE a2_task_download_cfg
+                SET start_time = ?, end_time = ?
+                WHERE task_id = ?
+                """,
+                (start_time, end_time, task_id),
             )
 
     def update_realtime_status(self, task_id: int, status: int) -> None:
