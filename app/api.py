@@ -11,9 +11,15 @@ from starlette.background import BackgroundTask
 from app.core.config import settings
 from app.db import init_db
 from app.schemas import (
+    A2SystemConfigUpdateRequest,
     ApiResponse,
     DownloadTaskCreate,
     DownloadExecuteRequest,
+    IntegrationAudioQueryRequest,
+    IntegrationDownloadTaskQueryRequest,
+    IntegrationDownloadTaskUpsertRequest,
+    IntegrationRealtimeTaskQueryRequest,
+    IntegrationRealtimeTaskUpsertRequest,
     LiveAtcDownloadExecuteRequest,
     RealtimeAsxCreate,
     RealtimeMonitorRequest,
@@ -367,3 +373,102 @@ def get_voice_file(unique_id: str) -> FileResponse:
 def run_metadata_sync() -> ApiResponse:
     result = metadata_sync.run_once()
     return ApiResponse(data=result, count=1)
+
+
+@app.get("/api/v1/integration/audio")
+def list_integration_audio(
+    unique_id: str | None = Query(None),
+    icao_code: str | None = Query(None),
+    band: str | None = Query(None),
+    start_time: str | None = Query(None),
+    end_time: str | None = Query(None),
+    page: int = Query(1),
+    page_size: int = Query(20),
+) -> ApiResponse:
+    payload = IntegrationAudioQueryRequest(
+        unique_id=unique_id,
+        icao_code=icao_code,
+        band=band,
+        start_time=start_time,
+        end_time=end_time,
+        page=page,
+        page_size=page_size,
+    )
+    total, rows = query_service.list_audio(payload)
+    return ApiResponse(data=rows, count=total)
+
+
+@app.get("/api/v1/integration/a2/realtime-tasks")
+def list_integration_realtime_tasks(
+    icao_code: str | None = Query(None),
+    band: str | None = Query(None),
+    status: int | None = Query(None),
+    page: int = Query(1),
+    page_size: int = Query(20),
+) -> ApiResponse:
+    payload = IntegrationRealtimeTaskQueryRequest(
+        icao_code=icao_code,
+        band=band,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+    total, rows = realtime_service.task_repo.list_realtime_tasks_filtered(
+        icao_code=payload.icao_code,
+        band=payload.band,
+        status=payload.status,
+        page_num=payload.page,
+        page_size=payload.page_size,
+    )
+    return ApiResponse(data=rows, count=total)
+
+
+@app.post("/api/v1/integration/a2/realtime-tasks")
+def upsert_integration_realtime_task(payload: IntegrationRealtimeTaskUpsertRequest) -> ApiResponse:
+    task_id = realtime_service.task_repo.upsert_realtime_task(payload)
+    row = realtime_service.task_repo.get_realtime_task(task_id)
+    return ApiResponse(data=row, count=1)
+
+
+@app.get("/api/v1/integration/a2/download-tasks")
+def list_integration_download_tasks(
+    icao_code: str | None = Query(None),
+    band: str | None = Query(None),
+    status: int | None = Query(None),
+    page: int = Query(1),
+    page_size: int = Query(20),
+) -> ApiResponse:
+    payload = IntegrationDownloadTaskQueryRequest(
+        icao_code=icao_code,
+        band=band,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+    total, rows = download_service.task_repo.list_download_tasks_filtered(
+        icao_code=payload.icao_code,
+        band=payload.band,
+        status=payload.status,
+        page_num=payload.page,
+        page_size=payload.page_size,
+    )
+    return ApiResponse(data=rows, count=total)
+
+
+@app.post("/api/v1/integration/a2/download-tasks")
+def upsert_integration_download_task(payload: IntegrationDownloadTaskUpsertRequest) -> ApiResponse:
+    task_id = download_service.task_repo.upsert_download_task(payload)
+    row = download_service.task_repo.get_download_task(task_id)
+    return ApiResponse(data=row, count=1)
+
+
+@app.get("/api/v1/integration/a2/system-config")
+def get_integration_a2_system_config() -> ApiResponse:
+    row = download_service.task_repo.get_system_config()
+    return ApiResponse(data=row, count=1 if row else 0)
+
+
+@app.put("/api/v1/integration/a2/system-config")
+def update_integration_a2_system_config(payload: A2SystemConfigUpdateRequest) -> ApiResponse:
+    row = download_service.task_repo.update_system_config(payload)
+    return ApiResponse(data=row, count=1 if row else 0)

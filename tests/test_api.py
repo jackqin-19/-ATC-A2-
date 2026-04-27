@@ -593,6 +593,163 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "realtime task 999 not found")
 
+    def test_integration_audio_endpoint_supports_time_range_query(self) -> None:
+        task_response = self.client.post(
+            "/api/a2/tasks/download",
+            json={
+                "task_name": "integration-audio-task",
+                "icao_code": "ZBAA",
+                "band": "tower",
+                "start_time": "2026-04-06 10:00:00",
+                "end_time": "2026-04-06 10:00:05",
+            },
+        )
+        self.assertEqual(task_response.status_code, 200)
+        task_id = task_response.json()["data"]["taskId"]
+
+        import_response = self.client.post(
+            (
+                f"/api/a2/voice/import/history?taskId={task_id}&icaoCode=ZBAA&band=tower"
+                "&startAt=2026-04-06%2010:00:00&endAt=2026-04-06%2010:00:05"
+                "&originalTime=2026-04-06%2010:00:00"
+            ),
+            files={"file": ("segment.wav", build_wav_bytes(5, 440.0), "audio/wav")},
+        )
+        self.assertEqual(import_response.status_code, 200)
+        unique_id = import_response.json()["data"]["unique_id"]
+
+        response = self.client.get(
+            "/api/v1/integration/audio",
+            params={
+                "icao_code": "ZBAA",
+                "band": "tower",
+                "start_time": "2026-04-06 10:00:01",
+                "end_time": "2026-04-06 10:00:04",
+                "page": 1,
+                "page_size": 10,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["data"][0]["unique_id"], unique_id)
+
+    def test_integration_realtime_task_endpoints_support_upsert_and_filtering(self) -> None:
+        create_response = self.client.post(
+            "/api/v1/integration/a2/realtime-tasks",
+            json={
+                "task_name": "integration-live-task",
+                "source_url": "http://127.0.0.1/live.mp3",
+                "protocol": "HTTP_STREAM",
+                "timeout": 20,
+                "heart_beat": 8,
+                "icao_code": "ZBAA",
+                "band": "tower",
+                "status": 0,
+                "segment_seconds": 30,
+                "stream_format": "mp3",
+            },
+        )
+        self.assertEqual(create_response.status_code, 200)
+        created = create_response.json()["data"]
+        self.assertEqual(created["icao_code"], "ZBAA")
+        self.assertEqual(created["band"], "tower")
+
+        list_response = self.client.get(
+            "/api/v1/integration/a2/realtime-tasks",
+            params={"icao_code": "ZBAA", "band": "tower", "page": 1, "page_size": 10},
+        )
+        self.assertEqual(list_response.status_code, 200)
+        list_payload = list_response.json()
+        self.assertEqual(list_payload["count"], 1)
+
+        update_response = self.client.post(
+            "/api/v1/integration/a2/realtime-tasks",
+            json={
+                "task_id": created["task_id"],
+                "task_name": "integration-live-task-updated",
+                "source_url": "http://127.0.0.1/live.mp3",
+                "protocol": "HTTP_STREAM",
+                "timeout": 25,
+                "heart_beat": 9,
+                "icao_code": "ZBAA",
+                "band": "tower",
+                "status": 1,
+                "segment_seconds": 45,
+                "stream_format": "mp3",
+            },
+        )
+        self.assertEqual(update_response.status_code, 200)
+        updated = update_response.json()["data"]
+        self.assertEqual(updated["task_name"], "integration-live-task-updated")
+        self.assertEqual(updated["status"], 1)
+
+    def test_integration_download_task_endpoints_support_upsert_and_filtering(self) -> None:
+        create_response = self.client.post(
+            "/api/v1/integration/a2/download-tasks",
+            json={
+                "task_name": "integration-download-task",
+                "icao_code": "VHHH",
+                "band": "tower",
+                "start_time": "2026-04-14 00:00:00",
+                "end_time": "2026-04-14 00:30:00",
+                "speed_limit": 0,
+                "exec_type": 1,
+                "status": 0,
+            },
+        )
+        self.assertEqual(create_response.status_code, 200)
+        created = create_response.json()["data"]
+        self.assertEqual(created["icao_code"], "VHHH")
+
+        list_response = self.client.get(
+            "/api/v1/integration/a2/download-tasks",
+            params={"icao_code": "VHHH", "band": "tower", "page": 1, "page_size": 10},
+        )
+        self.assertEqual(list_response.status_code, 200)
+        list_payload = list_response.json()
+        self.assertEqual(list_payload["count"], 1)
+
+        update_response = self.client.post(
+            "/api/v1/integration/a2/download-tasks",
+            json={
+                "task_id": created["task_id"],
+                "task_name": "integration-download-task-updated",
+                "icao_code": "VHHH",
+                "band": "tower",
+                "start_time": "2026-04-14 00:00:00",
+                "end_time": "2026-04-14 00:20:00",
+                "speed_limit": 128,
+                "exec_type": 1,
+                "status": 1,
+            },
+        )
+        self.assertEqual(update_response.status_code, 200)
+        updated = update_response.json()["data"]
+        self.assertEqual(updated["task_name"], "integration-download-task-updated")
+        self.assertEqual(updated["status"], 1)
+
+    def test_integration_a2_system_config_endpoints(self) -> None:
+        get_response = self.client.get("/api/v1/integration/a2/system-config")
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(get_response.json()["data"]["max_download_task"], 3)
+
+        update_response = self.client.put(
+            "/api/v1/integration/a2/system-config",
+            json={
+                "storage_root": "/atc/a2/custom/",
+                "slice_rule": "10min/200MB",
+                "max_download_task": 5,
+                "max_realtime_conn": 7,
+                "api_timeout": 12,
+                "sync_interval": 9,
+            },
+        )
+        self.assertEqual(update_response.status_code, 200)
+        payload = update_response.json()["data"]
+        self.assertEqual(payload["storage_root"], "/atc/a2/custom/")
+        self.assertEqual(payload["max_download_task"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

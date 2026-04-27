@@ -3,7 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 from app.db import get_conn
-from app.schemas import DownloadTaskCreate, RealtimeTaskCreate, VoiceRecord
+from app.schemas import (
+    A2SystemConfigUpdateRequest,
+    DownloadTaskCreate,
+    IntegrationDownloadTaskUpsertRequest,
+    IntegrationRealtimeTaskUpsertRequest,
+    RealtimeTaskCreate,
+    VoiceRecord,
+)
 
 
 class VoiceRepository:
@@ -94,6 +101,56 @@ class VoiceRepository:
         with get_conn() as conn:
             rows = conn.execute("SELECT * FROM a2_voice_info ORDER BY created_at ASC").fetchall()
         return [dict(row) for row in rows]
+
+    def search_voice_records(
+        self,
+        *,
+        unique_id: str | None,
+        icao_code: str | None,
+        band: str | None,
+        start_time: str | None,
+        end_time: str | None,
+        page_num: int,
+        page_size: int,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        filters = ["valid_status = 'valid'"]
+        params: list[Any] = []
+        if unique_id:
+            filters.append("unique_id = ?")
+            params.append(unique_id)
+        if icao_code:
+            filters.append("icao_code = ?")
+            params.append(icao_code)
+        if band:
+            filters.append("band = ?")
+            params.append(band)
+        if start_time and end_time:
+            filters.append("start_at < ?")
+            filters.append("end_at > ?")
+            params.extend([end_time, start_time])
+        elif start_time:
+            filters.append("end_at > ?")
+            params.append(start_time)
+        elif end_time:
+            filters.append("start_at < ?")
+            params.append(end_time)
+
+        where_sql = " AND ".join(filters)
+        with get_conn() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(1) FROM a2_voice_info WHERE {where_sql}",
+                tuple(params),
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT * FROM a2_voice_info
+                WHERE {where_sql}
+                ORDER BY start_at ASC, unique_id ASC
+                LIMIT ? OFFSET ?
+                """,
+                tuple(params + [page_size, (page_num - 1) * page_size]),
+            ).fetchall()
+        return total, [dict(row) for row in rows]
 
     def update_voice_status(
         self,
@@ -196,6 +253,44 @@ class TaskRepository:
             rows = conn.execute("SELECT * FROM a2_task_realtime_cfg ORDER BY task_id DESC").fetchall()
         return [dict(row) for row in rows]
 
+    def list_realtime_tasks_filtered(
+        self,
+        *,
+        icao_code: str | None,
+        band: str | None,
+        status: int | None,
+        page_num: int,
+        page_size: int,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        filters = ["1 = 1"]
+        params: list[Any] = []
+        if icao_code:
+            filters.append("icao_code = ?")
+            params.append(icao_code)
+        if band:
+            filters.append("band = ?")
+            params.append(band)
+        if status is not None:
+            filters.append("status = ?")
+            params.append(status)
+
+        where_sql = " AND ".join(filters)
+        with get_conn() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(1) FROM a2_task_realtime_cfg WHERE {where_sql}",
+                tuple(params),
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT * FROM a2_task_realtime_cfg
+                WHERE {where_sql}
+                ORDER BY task_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                tuple(params + [page_size, (page_num - 1) * page_size]),
+            ).fetchall()
+        return total, [dict(row) for row in rows]
+
     def get_realtime_task(self, task_id: int) -> dict[str, Any] | None:
         with get_conn() as conn:
             row = conn.execute(
@@ -208,6 +303,44 @@ class TaskRepository:
         with get_conn() as conn:
             rows = conn.execute("SELECT * FROM a2_task_download_cfg ORDER BY task_id DESC").fetchall()
         return [dict(row) for row in rows]
+
+    def list_download_tasks_filtered(
+        self,
+        *,
+        icao_code: str | None,
+        band: str | None,
+        status: int | None,
+        page_num: int,
+        page_size: int,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        filters = ["1 = 1"]
+        params: list[Any] = []
+        if icao_code:
+            filters.append("icao_code = ?")
+            params.append(icao_code)
+        if band:
+            filters.append("band = ?")
+            params.append(band)
+        if status is not None:
+            filters.append("status = ?")
+            params.append(status)
+
+        where_sql = " AND ".join(filters)
+        with get_conn() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(1) FROM a2_task_download_cfg WHERE {where_sql}",
+                tuple(params),
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT * FROM a2_task_download_cfg
+                WHERE {where_sql}
+                ORDER BY task_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                tuple(params + [page_size, (page_num - 1) * page_size]),
+            ).fetchall()
+        return total, [dict(row) for row in rows]
 
     def get_download_task(self, task_id: int) -> dict[str, Any] | None:
         with get_conn() as conn:
@@ -245,3 +378,139 @@ class TaskRepository:
                 "UPDATE a2_task_realtime_cfg SET status = ? WHERE task_id = ?",
                 (status, task_id),
             )
+
+    def upsert_realtime_task(self, payload: IntegrationRealtimeTaskUpsertRequest) -> int:
+        with get_conn() as conn:
+            if payload.task_id is not None:
+                exists = conn.execute(
+                    "SELECT 1 FROM a2_task_realtime_cfg WHERE task_id = ?",
+                    (payload.task_id,),
+                ).fetchone()
+                if exists:
+                    conn.execute(
+                        """
+                        UPDATE a2_task_realtime_cfg
+                        SET task_name = ?, server_addr = ?, server_port = ?, protocol = ?, timeout = ?,
+                            heart_beat = ?, icao_code = ?, band = ?, source_url = ?, segment_seconds = ?,
+                            stream_format = ?, status = ?
+                        WHERE task_id = ?
+                        """,
+                        (
+                            payload.task_name,
+                            payload.server_addr,
+                            payload.server_port,
+                            payload.protocol,
+                            payload.timeout,
+                            payload.heart_beat,
+                            payload.icao_code,
+                            payload.band,
+                            payload.source_url,
+                            payload.segment_seconds,
+                            payload.stream_format,
+                            payload.status,
+                            payload.task_id,
+                        ),
+                    )
+                    return payload.task_id
+
+            cursor = conn.execute(
+                """
+                INSERT INTO a2_task_realtime_cfg (
+                    task_name, server_addr, server_port, protocol, timeout, heart_beat, icao_code, band,
+                    source_url, segment_seconds, stream_format, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload.task_name,
+                    payload.server_addr,
+                    payload.server_port,
+                    payload.protocol,
+                    payload.timeout,
+                    payload.heart_beat,
+                    payload.icao_code,
+                    payload.band,
+                    payload.source_url,
+                    payload.segment_seconds,
+                    payload.stream_format,
+                    payload.status,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def upsert_download_task(self, payload: IntegrationDownloadTaskUpsertRequest) -> int:
+        with get_conn() as conn:
+            if payload.task_id is not None:
+                exists = conn.execute(
+                    "SELECT 1 FROM a2_task_download_cfg WHERE task_id = ?",
+                    (payload.task_id,),
+                ).fetchone()
+                if exists:
+                    conn.execute(
+                        """
+                        UPDATE a2_task_download_cfg
+                        SET task_name = ?, icao_code = ?, band = ?, start_time = ?, end_time = ?,
+                            speed_limit = ?, exec_type = ?, exec_time = ?, status = ?, priority = ?
+                        WHERE task_id = ?
+                        """,
+                        (
+                            payload.task_name,
+                            payload.icao_code,
+                            payload.band,
+                            payload.start_time,
+                            payload.end_time,
+                            payload.speed_limit,
+                            payload.exec_type,
+                            payload.exec_time,
+                            payload.status,
+                            payload.priority,
+                            payload.task_id,
+                        ),
+                    )
+                    return payload.task_id
+
+            cursor = conn.execute(
+                """
+                INSERT INTO a2_task_download_cfg (
+                    task_name, icao_code, band, start_time, end_time, speed_limit, exec_type, exec_time, status, priority
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload.task_name,
+                    payload.icao_code,
+                    payload.band,
+                    payload.start_time,
+                    payload.end_time,
+                    payload.speed_limit,
+                    payload.exec_type,
+                    payload.exec_time,
+                    payload.status,
+                    payload.priority,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def get_system_config(self) -> dict[str, Any]:
+        with get_conn() as conn:
+            row = conn.execute("SELECT * FROM a2_sys_base_cfg WHERE id = 1").fetchone()
+        return dict(row) if row else {}
+
+    def update_system_config(self, payload: A2SystemConfigUpdateRequest) -> dict[str, Any]:
+        with get_conn() as conn:
+            conn.execute(
+                """
+                UPDATE a2_sys_base_cfg
+                SET storage_root = ?, slice_rule = ?, max_download_task = ?, max_realtime_conn = ?,
+                    api_timeout = ?, sync_interval = ?, update_time = CURRENT_TIMESTAMP
+                WHERE id = 1
+                """,
+                (
+                    payload.storage_root,
+                    payload.slice_rule,
+                    payload.max_download_task,
+                    payload.max_realtime_conn,
+                    payload.api_timeout,
+                    payload.sync_interval,
+                ),
+            )
+            row = conn.execute("SELECT * FROM a2_sys_base_cfg WHERE id = 1").fetchone()
+        return dict(row) if row else {}

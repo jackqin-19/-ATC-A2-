@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.repositories import VoiceRepository
-from app.schemas import VoiceQueryRequest
+from app.schemas import IntegrationAudioQueryRequest, VoiceQueryRequest
 
 
 class QueryService:
@@ -17,6 +17,21 @@ class QueryService:
             page_num=payload.pageNum,
             page_size=payload.pageSize,
         )
+        return total, self._enrich_rows(rows)
+
+    def list_audio(self, payload: IntegrationAudioQueryRequest) -> tuple[int, list[dict]]:
+        total, rows = self.repository.search_voice_records(
+            unique_id=payload.unique_id,
+            icao_code=payload.icao_code,
+            band=payload.band,
+            start_time=payload.start_time,
+            end_time=payload.end_time,
+            page_num=payload.page,
+            page_size=payload.page_size,
+        )
+        return total, self._enrich_rows(rows)
+
+    def _enrich_rows(self, rows: list[dict]) -> list[dict]:
         enriched: list[dict] = []
         for row in rows:
             track_ids = self.repository.find_tracks(row["icao_code"], row["start_at"], row["end_at"])
@@ -25,4 +40,4 @@ class QueryService:
             row["trackIds"] = track_ids
             row["downloadUrl"] = f"/api/a2/voice/file/{row['unique_id']}"
             enriched.append(row)
-        return total, enriched
+        return enriched
