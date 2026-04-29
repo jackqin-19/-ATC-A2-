@@ -1,3 +1,10 @@
+"""数据库访问层。
+
+这一层的目标是把“业务含义”和“SQL 细节”隔离开。
+上层 Service 只关心“创建任务”“查重叠语音”“更新进度”这些动作，
+不需要知道表名、字段名和 SQL 拼接细节，这样代码层次会更清晰。
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -14,7 +21,11 @@ from app.schemas import (
 
 
 class VoiceRepository:
+    """负责语音元数据及语音和航迹关系的数据库操作。"""
+
     def insert_voice_record(self, record: VoiceRecord) -> None:
+        """写入或覆盖一条语音元数据记录。"""
+
         with get_conn() as conn:
             conn.execute(
                 """
@@ -49,6 +60,17 @@ class VoiceRepository:
         page_num: int,
         page_size: int,
     ) -> tuple[int, list[dict[str, Any]]]:
+        """按时间重叠条件查询语音记录，并支持分页。
+
+        这里最关键的不是“时间相等”，而是“时间重叠”：
+        - `start_at < 查询结束`
+        - `end_at > 查询开始`
+
+        因为用户查询的时间窗口通常不会刚好和切片边界完全对齐，
+        所以必须找出所有有重叠关系的片段，才能保证后续导出的语音完整。
+        """
+
+        # 只返回有效记录，并基于时间重叠关系做过滤。
         filters = ["start_at < ?", "end_at > ?", "valid_status = 'valid'"]
         params: list[Any] = [end_time, start_time]
         if icao_code:
@@ -78,6 +100,12 @@ class VoiceRepository:
     def query_overlapping_segments(
         self, start_time: str, end_time: str, icao_code: str, band: str
     ) -> list[dict[str, Any]]:
+        """查询与目标时间段有重叠的所有语音片段。
+
+        这个方法主要给音频裁剪和拼接逻辑使用，所以不分页，
+        需要一次性拿到完整的命中片段集合。
+        """
+
         with get_conn() as conn:
             rows = conn.execute(
                 """
@@ -90,6 +118,8 @@ class VoiceRepository:
         return [dict(row) for row in rows]
 
     def get_voice_by_unique_id(self, unique_id: str) -> dict[str, Any] | None:
+        """根据唯一标识获取单条语音记录。"""
+
         with get_conn() as conn:
             row = conn.execute(
                 "SELECT * FROM a2_voice_info WHERE unique_id = ?",
@@ -98,6 +128,8 @@ class VoiceRepository:
         return dict(row) if row else None
 
     def list_voice_records(self) -> list[dict[str, Any]]:
+        """列出全部语音记录，供同步任务全量扫描。"""
+
         with get_conn() as conn:
             rows = conn.execute("SELECT * FROM a2_voice_info ORDER BY created_at ASC").fetchall()
         return [dict(row) for row in rows]
@@ -113,6 +145,12 @@ class VoiceRepository:
         page_num: int,
         page_size: int,
     ) -> tuple[int, list[dict[str, Any]]]:
+        """按多个可选条件搜索语音记录。
+
+        这是给集成接口使用的更通用查询：
+        既可以按唯一 ID 精确找，也可以按机场、频段、时间范围组合过滤。
+        """
+
         filters = ["valid_status = 'valid'"]
         params: list[Any] = []
         if unique_id:
@@ -160,6 +198,12 @@ class VoiceRepository:
         file_size: int | None = None,
         checksum: str | None = None,
     ) -> None:
+        """更新语音记录的有效状态、文件大小和校验值。
+
+        这个方法主要服务于同步修复逻辑：
+        当磁盘文件丢失、大小不一致或校验和变化时，用它回写数据库状态。
+        """
+
         fields = ["valid_status = ?"]
         params: list[Any] = [valid_status]
         if file_size is not None:
@@ -176,6 +220,12 @@ class VoiceRepository:
             )
 
     def upsert_voice_track_rel(self, unique_id: str, track_id: str) -> None:
+        """建立语音和航迹的关联关系，已存在则不重复插入。
+
+        这里没有直接使用数据库唯一约束，而是先查后插，
+        目的是让逻辑更直观，也避免重复关联数据不断膨胀。
+        """
+
         with get_conn() as conn:
             exists = conn.execute(
                 "SELECT 1 FROM a2_voice_track_rel WHERE unique_id = ? AND track_id = ?",
@@ -188,6 +238,8 @@ class VoiceRepository:
                 )
 
     def find_tracks(self, icao_code: str, start_time: str, end_time: str) -> list[str]:
+        """查找指定机场和时间范围内的航迹 ID。"""
+
         with get_conn() as conn:
             rows = conn.execute(
                 """
@@ -201,7 +253,11 @@ class VoiceRepository:
 
 
 class TaskRepository:
+    """负责实时任务、下载任务和系统配置的数据库操作。"""
+
     def create_realtime_task(self, payload: RealtimeTaskCreate) -> int:
+        """创建一条实时任务配置记录。"""
+
         with get_conn() as conn:
             cursor = conn.execute(
                 """
@@ -227,6 +283,8 @@ class TaskRepository:
             return int(cursor.lastrowid)
 
     def create_download_task(self, payload: DownloadTaskCreate) -> int:
+        """创建一条历史下载任务配置记录。"""
+
         with get_conn() as conn:
             cursor = conn.execute(
                 """
@@ -249,6 +307,8 @@ class TaskRepository:
             return int(cursor.lastrowid)
 
     def list_realtime_tasks(self) -> list[dict[str, Any]]:
+        """按任务 ID 倒序列出实时任务。"""
+
         with get_conn() as conn:
             rows = conn.execute("SELECT * FROM a2_task_realtime_cfg ORDER BY task_id DESC").fetchall()
         return [dict(row) for row in rows]
@@ -262,6 +322,8 @@ class TaskRepository:
         page_num: int,
         page_size: int,
     ) -> tuple[int, list[dict[str, Any]]]:
+        """按条件分页查询实时任务。"""
+
         filters = ["1 = 1"]
         params: list[Any] = []
         if icao_code:
@@ -292,6 +354,8 @@ class TaskRepository:
         return total, [dict(row) for row in rows]
 
     def get_realtime_task(self, task_id: int) -> dict[str, Any] | None:
+        """获取单条实时任务配置。"""
+
         with get_conn() as conn:
             row = conn.execute(
                 "SELECT * FROM a2_task_realtime_cfg WHERE task_id = ?",
@@ -300,6 +364,8 @@ class TaskRepository:
         return dict(row) if row else None
 
     def list_download_tasks(self) -> list[dict[str, Any]]:
+        """按任务 ID 倒序列出下载任务。"""
+
         with get_conn() as conn:
             rows = conn.execute("SELECT * FROM a2_task_download_cfg ORDER BY task_id DESC").fetchall()
         return [dict(row) for row in rows]
@@ -313,6 +379,8 @@ class TaskRepository:
         page_num: int,
         page_size: int,
     ) -> tuple[int, list[dict[str, Any]]]:
+        """按条件分页查询下载任务。"""
+
         filters = ["1 = 1"]
         params: list[Any] = []
         if icao_code:
@@ -343,6 +411,8 @@ class TaskRepository:
         return total, [dict(row) for row in rows]
 
     def get_download_task(self, task_id: int) -> dict[str, Any] | None:
+        """获取单条下载任务配置。"""
+
         with get_conn() as conn:
             row = conn.execute(
                 "SELECT * FROM a2_task_download_cfg WHERE task_id = ?",
@@ -351,6 +421,12 @@ class TaskRepository:
         return dict(row) if row else None
 
     def update_download_progress(self, task_id: int, progress: float, resume_from: int, status: int) -> None:
+        """更新下载任务的进度、续传偏移量和状态码。
+
+        这里的 `resume_from` 表示已下载的字节数，后续如果再次下载，
+        可以通过 HTTP Range 从这个位置继续请求。
+        """
+
         with get_conn() as conn:
             conn.execute(
                 """
@@ -362,6 +438,12 @@ class TaskRepository:
             )
 
     def update_download_task_time_range(self, task_id: int, start_time: str, end_time: str) -> None:
+        """在元数据推断完成后回填下载任务时间范围。
+
+        某些历史文件一开始只有 URL，没有明确时间范围，
+        需要在解析文件名或探测音频时长后再把时间写回任务表。
+        """
+
         with get_conn() as conn:
             conn.execute(
                 """
@@ -373,6 +455,8 @@ class TaskRepository:
             )
 
     def update_realtime_status(self, task_id: int, status: int) -> None:
+        """更新实时任务当前运行状态。"""
+
         with get_conn() as conn:
             conn.execute(
                 "UPDATE a2_task_realtime_cfg SET status = ? WHERE task_id = ?",
@@ -380,6 +464,8 @@ class TaskRepository:
             )
 
     def upsert_realtime_task(self, payload: IntegrationRealtimeTaskUpsertRequest) -> int:
+        """供集成接口新增或更新实时任务。"""
+
         with get_conn() as conn:
             if payload.task_id is not None:
                 exists = conn.execute(
@@ -438,6 +524,8 @@ class TaskRepository:
             return int(cursor.lastrowid)
 
     def upsert_download_task(self, payload: IntegrationDownloadTaskUpsertRequest) -> int:
+        """供集成接口新增或更新下载任务。"""
+
         with get_conn() as conn:
             if payload.task_id is not None:
                 exists = conn.execute(
@@ -490,11 +578,15 @@ class TaskRepository:
             return int(cursor.lastrowid)
 
     def get_system_config(self) -> dict[str, Any]:
+        """读取系统基础配置。"""
+
         with get_conn() as conn:
             row = conn.execute("SELECT * FROM a2_sys_base_cfg WHERE id = 1").fetchone()
         return dict(row) if row else {}
 
     def update_system_config(self, payload: A2SystemConfigUpdateRequest) -> dict[str, Any]:
+        """更新系统基础配置并返回最新结果。"""
+
         with get_conn() as conn:
             conn.execute(
                 """

@@ -1,3 +1,9 @@
+"""接口层测试。
+
+这组测试通过 FastAPI TestClient 直接请求接口，
+验证 HTTP 路由、参数解析、文件导出和集成接口行为是否正常。
+"""
+
 from __future__ import annotations
 
 import io
@@ -22,6 +28,8 @@ from app.services.task_service import DownloadTaskService
 
 
 def build_wav_bytes(seconds: int, freq: float) -> bytes:
+    """生成测试用 WAV 二进制内容。"""
+
     sample_rate = 8000
     frames: list[bytes] = []
     for i in range(sample_rate * seconds):
@@ -37,6 +45,8 @@ def build_wav_bytes(seconds: int, freq: float) -> bytes:
 
 
 def build_mp3_bytes(seconds: int) -> bytes:
+    """借助 ffmpeg 生成测试用 MP3 二进制内容。"""
+
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise unittest.SkipTest("ffmpeg not available")
@@ -70,9 +80,13 @@ def build_mp3_bytes(seconds: int) -> bytes:
 
 
 class StreamingFixtureHandler(BaseHTTPRequestHandler):
+    """为接口测试提供本地模拟流和归档文件的 HTTP 处理器。"""
+
     server_version = "A2TestHTTP/1.0"
 
     def do_GET(self) -> None:  # noqa: N802
+        """根据测试路径返回 ASX、实时流或历史归档文件。"""
+
         if self.path == "/live.asx":
             body = self.server.asx_body.encode("utf-8")
             self.send_response(200)
@@ -105,10 +119,14 @@ class StreamingFixtureHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
+        """关闭默认日志输出，避免测试时控制台噪声过多。"""
+
         return
 
 
 class StreamingFixtureServer(ThreadingHTTPServer):
+    """带自定义测试数据字段的本地 HTTP 测试服务器。"""
+
     asx_body: str
     stream_chunks: list[bytes]
     chunk_delay: float
@@ -117,7 +135,11 @@ class StreamingFixtureServer(ThreadingHTTPServer):
 
 
 class A2ApiTestCase(unittest.TestCase):
+    """验证 API 层主要接口行为的测试集合。"""
+
     def setUp(self) -> None:
+        """为每个接口测试创建独立的应用环境和测试客户端。"""
+
         self.root = Path.cwd() / "test_artifacts" / f"api_{self._testMethodName}"
         if self.root.exists():
             shutil.rmtree(self.root, ignore_errors=True)
@@ -141,6 +163,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.client = self.client_cm.__enter__()
 
     def tearDown(self) -> None:
+        """关闭测试客户端并清理临时测试目录。"""
+
         self.client_cm.__exit__(None, None, None)
         for key, value in self.original_values.items():
             object.__setattr__(settings, key, value)
@@ -148,6 +172,8 @@ class A2ApiTestCase(unittest.TestCase):
             shutil.rmtree(self.root, ignore_errors=True)
 
     def start_stream_server(self) -> tuple[StreamingFixtureServer, threading.Thread]:
+        """启动一个本地 HTTP 服务，模拟实时流和历史归档下载源。"""
+
         server = StreamingFixtureServer(("127.0.0.1", 0), StreamingFixtureHandler)
         server.stream_chunks = [b"MP3DATA" * 256 for _ in range(4)]
         server.chunk_delay = 0.6
@@ -165,12 +191,16 @@ class A2ApiTestCase(unittest.TestCase):
         return server, thread
 
     def test_health_endpoint(self) -> None:
+        """验证健康检查接口可用。"""
+
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["data"]["status"], "ok")
 
     def test_import_history_and_query_endpoint(self) -> None:
+        """验证历史导入接口和时间范围查询接口可以串起来工作。"""
+
         task_response = self.client.post(
             "/api/a2/tasks/download",
             json={
@@ -211,6 +241,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["data"][0]["icao_code"], "ZBAA")
 
     def test_slice_endpoint_returns_wav_content(self) -> None:
+        """验证切片接口返回的音频内容时长正确。"""
+
         service = DownloadTaskService()
         task_id = service.create_task(
             DownloadTaskCreate(
@@ -261,6 +293,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertAlmostEqual(duration, 6.0, places=1)
 
     def test_export_endpoint_returns_wav_content_and_cleans_temp_slice(self) -> None:
+        """验证导出接口会返回文件，并在结束后清理临时切片。"""
+
         service = DownloadTaskService()
         task_id = service.create_task(
             DownloadTaskCreate(
@@ -314,6 +348,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(temp_files, [])
 
     def test_sync_endpoint_reports_missing_file(self) -> None:
+        """验证同步接口能报告缺失文件数量。"""
+
         service = DownloadTaskService()
         task_id = service.create_task(
             DownloadTaskCreate(
@@ -342,6 +378,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["data"]["missing"], 1)
 
     def test_file_endpoint_reports_missing_physical_file(self) -> None:
+        """验证数据库有记录但文件丢失时，下载接口返回 404。"""
+
         service = DownloadTaskService()
         task_id = service.create_task(
             DownloadTaskCreate(
@@ -370,6 +408,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "voice file missing on disk")
 
     def test_import_history_endpoint_cleans_temp_upload(self) -> None:
+        """验证上传导入接口处理完后会清理临时文件。"""
+
         task_response = self.client.post(
             "/api/a2/tasks/download",
             json={
@@ -396,6 +436,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual([entry for entry in temp_entries if entry.is_file()], [])
 
     def test_import_liveatc_history_file_without_manual_metadata(self) -> None:
+        """验证只上传 LiveATC 文件也能自动推断元数据。"""
+
         response = self.client.post(
             "/api/a2/voice/import/history/liveatc",
             files={
@@ -414,6 +456,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["end_at"], "2026-04-14 00:00:02")
 
     def test_execute_liveatc_download_persists_file_and_supports_time_range_query(self) -> None:
+        """验证 LiveATC 下载、入库、查询和文件回传整条链路。"""
+
         server, thread = self.start_stream_server()
         try:
             response = self.client.post(
@@ -468,6 +512,8 @@ class A2ApiTestCase(unittest.TestCase):
             thread.join(timeout=2)
 
     def test_import_liveatc_history_file_truncates_to_first_30_minutes(self) -> None:
+        """验证超长 LiveATC 导入会被裁成前 30 分钟。"""
+
         response = self.client.post(
             "/api/a2/voice/import/history/liveatc",
             files={
@@ -488,6 +534,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertGreaterEqual(stored_duration, 1798)
 
     def test_sync_endpoint_repairs_stale_metadata(self) -> None:
+        """验证同步接口可以修复过期的文件大小和校验信息。"""
+
         response = self.client.post(
             "/api/a2/voice/import/history/liveatc",
             files={
@@ -528,6 +576,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(row[2], "valid")
 
     def test_create_task_from_asx_and_receive_stream_segments(self) -> None:
+        """验证从 ASX 创建实时任务后，可以真正接收并落盘多个片段。"""
+
         server, thread = self.start_stream_server()
         try:
             create_response = self.client.post(
@@ -586,6 +636,8 @@ class A2ApiTestCase(unittest.TestCase):
             thread.join(timeout=2)
 
     def test_start_realtime_receive_reports_missing_task(self) -> None:
+        """验证启动不存在的实时任务时会返回明确错误。"""
+
         response = self.client.post(
             "/api/a2/tasks/realtime/start-receive",
             json={"task_id": 999},
@@ -594,6 +646,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "realtime task 999 not found")
 
     def test_integration_audio_endpoint_supports_time_range_query(self) -> None:
+        """验证集成语音查询接口支持按时间范围过滤。"""
+
         task_response = self.client.post(
             "/api/a2/tasks/download",
             json={
@@ -635,6 +689,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(payload["data"][0]["unique_id"], unique_id)
 
     def test_integration_realtime_task_endpoints_support_upsert_and_filtering(self) -> None:
+        """验证集成实时任务接口支持新增、更新和过滤。"""
+
         create_response = self.client.post(
             "/api/v1/integration/a2/realtime-tasks",
             json={
@@ -685,6 +741,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(updated["status"], 1)
 
     def test_integration_download_task_endpoints_support_upsert_and_filtering(self) -> None:
+        """验证集成下载任务接口支持新增、更新和过滤。"""
+
         create_response = self.client.post(
             "/api/v1/integration/a2/download-tasks",
             json={
@@ -730,6 +788,8 @@ class A2ApiTestCase(unittest.TestCase):
         self.assertEqual(updated["status"], 1)
 
     def test_integration_a2_system_config_endpoints(self) -> None:
+        """验证系统配置读取和更新接口可正常工作。"""
+
         get_response = self.client.get("/api/v1/integration/a2/system-config")
         self.assertEqual(get_response.status_code, 200)
         self.assertEqual(get_response.json()["data"]["max_download_task"], 3)

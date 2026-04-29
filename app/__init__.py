@@ -1,1 +1,1 @@
-"""A-2 voice processing module package."""
+"""A-2 语音处理模块包。"""

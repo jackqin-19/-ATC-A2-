@@ -1,3 +1,10 @@
+"""实时流运行时服务。
+
+这一层是真正“让实时任务跑起来”的地方：
+它负责解析流地址、启动后台线程、维护连接状态、持续读取音频流，
+并按固定时间切片写入本地和数据库。
+"""
+
 from __future__ import annotations
 
 import socket
@@ -18,6 +25,8 @@ from app.services.storage_service import StorageService
 class AsxStreamResolver:
     @staticmethod
     def parse(content: bytes, base_url: str | None = None) -> list[str]:
+        """解析 ASX 内容并提取可播放的真实流地址列表。"""
+
         text = content.decode("utf-8", errors="ignore").strip()
         if not text:
             raise ValueError("ASX file is empty")
@@ -31,6 +40,7 @@ class AsxStreamResolver:
                     if href:
                         refs.append(urljoin(base_url or "", href.strip()))
         except ET.ParseError:
+            # 有些 ASX 文件不是标准 XML，这里降级为按行解析。
             for line in text.splitlines():
                 lowered = line.strip().lower()
                 if lowered.startswith("ref") and "=" in line:
@@ -47,6 +57,8 @@ class AsxStreamResolver:
         return normalized
 
     def resolve_from_url(self, source_url: str) -> list[str]:
+        """直接通过 URL 下载 ASX 文件并解析。"""
+
         with urllib.request.urlopen(source_url, timeout=15) as response:
             content = response.read()
         return self.parse(content, base_url=source_url)
@@ -60,6 +72,8 @@ class RealtimeConnectionManager:
         storage_service: StorageService | None = None,
         resolver: AsxStreamResolver | None = None,
     ) -> None:
+        """维护实时任务运行线程、状态和切片落盘逻辑。"""
+
         self.repository = repository or TaskRepository()
         self.voice_repository = voice_repository or VoiceRepository()
         self.storage_service = storage_service or StorageService()
@@ -77,6 +91,8 @@ class RealtimeConnectionManager:
         heartbeat_payload: str = "PING\n",
         heartbeat_expect: str | None = None,
     ) -> None:
+        """启动心跳监控线程，负责检查连接是否可用。"""
+
         if task_id in self._threads and self._threads[task_id].is_alive():
             return
         stop_event = threading.Event()
@@ -96,6 +112,8 @@ class RealtimeConnectionManager:
         thread.start()
 
     def stop_monitor(self, task_id: int) -> None:
+        """停止心跳监控线程，并把任务状态置回空闲。"""
+
         event = self._stops.get(task_id)
         if event:
             event.set()
@@ -105,6 +123,8 @@ class RealtimeConnectionManager:
         self.repository.update_realtime_status(task_id, 0)
 
     def get_state(self, task_id: int) -> dict[str, object]:
+        """返回实时任务的运行状态快照。"""
+
         monitor_thread = self._threads.get(task_id)
         receive_thread = self._receive_threads.get(task_id)
         receive_state = self._receive_state.get(task_id, {})
@@ -120,6 +140,8 @@ class RealtimeConnectionManager:
         }
 
     def start_receive(self, task_id: int) -> None:
+        """启动接收线程，真正开始拉取音频流。"""
+
         if task_id in self._receive_threads and self._receive_threads[task_id].is_alive():
             return
         task = self.repository.get_realtime_task(task_id)
@@ -143,6 +165,8 @@ class RealtimeConnectionManager:
         thread.start()
 
     def stop_receive(self, task_id: int) -> None:
+        """停止接收线程。"""
+
         event = self._receive_stops.get(task_id)
         if event:
             event.set()
@@ -159,6 +183,8 @@ class RealtimeConnectionManager:
         heartbeat_payload: str,
         heartbeat_expect: str | None,
     ) -> None:
+        """监控 socket 连接状态，并在失败时按退避策略重试。"""
+
         backoff = [10, 30, 60]
         task = self.repository.get_realtime_task(task_id)
         if not task:
@@ -171,6 +197,7 @@ class RealtimeConnectionManager:
                 with socket.create_connection((task["server_addr"], task["server_port"]), timeout=task["timeout"]) as conn:
                     conn.settimeout(task["heart_beat"])
                     while not stop_event.wait(task["heart_beat"]):
+                        # 主动发送心跳，必要时检查对端响应内容。
                         conn.sendall(heartbeat_payload.encode("utf-8"))
                         if heartbeat_expect is not None:
                             data = conn.recv(1024).decode("utf-8", errors="ignore")
@@ -186,6 +213,7 @@ class RealtimeConnectionManager:
                     break
             except OSError:
                 self.repository.update_realtime_status(task_id, 2)
+                # 使用逐步增加的等待时间，避免频繁重连压垮上游。
                 delay = backoff[min(backoff_index, len(backoff) - 1)]
                 backoff_index = min(backoff_index + 1, len(backoff) - 1)
                 if stop_event.wait(delay):
@@ -195,6 +223,8 @@ class RealtimeConnectionManager:
         self.repository.update_realtime_status(task_id, 0)
 
     def _run_receive(self, *, task: dict[str, object], stop_event: threading.Event) -> None:
+        """循环拉取实时流，失败时自动重连。"""
+
         task_id = int(task["task_id"])
         backoff = [3, 10, 30]
         backoff_index = 0
@@ -222,6 +252,8 @@ class RealtimeConnectionManager:
         self.repository.update_realtime_status(task_id, 0)
 
     def _resolve_stream_url(self, source_url: str) -> str:
+        """如果传入的是 ASX 地址，就先解析出真实流地址。"""
+
         parsed = urlparse(source_url)
         suffix = Path(parsed.path).suffix.lower()
         if suffix == ".asx":
@@ -230,6 +262,8 @@ class RealtimeConnectionManager:
         return source_url
 
     def _record_stream(self, task: dict[str, object], stream_url: str, stop_event: threading.Event) -> None:
+        """持续读取流内容，并按固定秒数切成多个语音片段。"""
+
         request = urllib.request.Request(stream_url, headers={"User-Agent": "ATC-A2/1.0"})
         with urllib.request.urlopen(request, timeout=int(task.get("timeout") or 30)) as response:
             extension = self._guess_extension(
@@ -250,10 +284,12 @@ class RealtimeConnectionManager:
                 current_bytes.extend(chunk)
                 now = datetime.now(UTC)
                 if (now - segment_start).total_seconds() >= segment_seconds:
+                    # 达到切片时长后，立即落盘一个片段。
                     self._save_segment(task, bytes(current_bytes), segment_start, now, extension)
                     current_bytes = bytearray()
                     segment_start = now
             if current_bytes:
+                # 停止前剩余的尾部数据也要保存，避免丢音。
                 end_time = datetime.now(UTC)
                 self._save_segment(task, bytes(current_bytes), segment_start, end_time, extension)
 
@@ -265,6 +301,8 @@ class RealtimeConnectionManager:
         segment_end: datetime,
         extension: str,
     ) -> None:
+        """把单个实时切片写入本地，并写入语音元数据表。"""
+
         if not content:
             return
         original_time = format_datetime(segment_start)
@@ -285,11 +323,14 @@ class RealtimeConnectionManager:
             int(task["task_id"]),
             {"segmentsSaved": 0, "lastSegmentAt": None, "lastError": None, "streamUrl": None},
         )
+        # 运行状态里额外记录已保存片段数和最后一次切片时间，便于展示。
         task_state["segmentsSaved"] = int(task_state.get("segmentsSaved", 0)) + 1
         task_state["lastSegmentAt"] = record.end_at
 
     @staticmethod
     def _guess_extension(stream_url: str, content_type: str | None, declared_format: object) -> str:
+        """尽量推断实时流片段最终应该使用的文件后缀。"""
+
         if isinstance(declared_format, str) and declared_format.strip():
             return f".{declared_format.strip().lstrip('.')}"
         if content_type:

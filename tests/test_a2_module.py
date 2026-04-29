@@ -1,3 +1,8 @@
+"""核心业务层测试。
+
+这组测试主要验证不经过 HTTP 接口时，底层服务和仓储逻辑本身是否正确。
+"""
+
 from __future__ import annotations
 
 import math
@@ -20,6 +25,8 @@ from app.services.task_service import DownloadTaskService, RealtimeTaskService
 
 
 def build_wav(path: Path, seconds: int, freq: float) -> None:
+    """生成测试用 WAV 文件。"""
+
     sample_rate = 8000
     frames: list[bytes] = []
     for i in range(sample_rate * seconds):
@@ -33,6 +40,8 @@ def build_wav(path: Path, seconds: int, freq: float) -> None:
 
 
 def build_mp3(path: Path, seconds: int) -> None:
+    """借助 ffmpeg 生成测试用 MP3 文件。"""
+
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise unittest.SkipTest("ffmpeg not available")
@@ -58,7 +67,11 @@ def build_mp3(path: Path, seconds: int) -> None:
 
 
 class A2ModuleTestCase(unittest.TestCase):
+    """验证 service 和 repository 层核心逻辑的测试集合。"""
+
     def setUp(self) -> None:
+        """为每个测试准备独立的临时工作区和数据库。"""
+
         self.root = Path.cwd() / "test_artifacts" / self._testMethodName
         if self.root.exists():
             shutil.rmtree(self.root, ignore_errors=True)
@@ -78,12 +91,16 @@ class A2ModuleTestCase(unittest.TestCase):
         init_db()
 
     def tearDown(self) -> None:
+        """测试结束后恢复全局配置并清理临时目录。"""
+
         for key, value in self.original_values.items():
             object.__setattr__(settings, key, value)
         if self.root.exists():
             shutil.rmtree(self.root, ignore_errors=True)
 
     def test_query_voice_returns_overlapping_segments_and_track_ids(self) -> None:
+        """验证按时间范围查询时，能返回重叠片段和关联航迹。"""
+
         service = DownloadTaskService()
         fixture_1 = self.root / "seg1.wav"
         fixture_2 = self.root / "seg2.wav"
@@ -146,6 +163,8 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertIn("track-1", rows[0]["trackIds"])
 
     def test_audio_service_composes_cross_segment_wav(self) -> None:
+        """验证跨多个片段的 WAV 查询可以被正确拼接。"""
+
         service = DownloadTaskService()
         fixture_1 = self.root / "slice1.wav"
         fixture_2 = self.root / "slice2.wav"
@@ -198,6 +217,8 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertAlmostEqual(duration, 6.0, places=1)
 
     def test_execute_http_download_imports_file_and_updates_progress(self) -> None:
+        """验证普通下载流程会写入文件并把进度更新为完成。"""
+
         fixture = self.root / "history.wav"
         build_wav(fixture, 3, 550.0)
         service = DownloadTaskService()
@@ -233,6 +254,8 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertEqual(row[1], 1)
 
     def test_parse_liveatc_archive_metadata_from_filename(self) -> None:
+        """验证可以仅从 LiveATC 文件名中解析出基础元数据。"""
+
         metadata = DownloadTaskService().parse_liveatc_archive_metadata(
             "VHHH9-Del-Gnd-Twr-Dir-Apr-14-2026-0000Z.mp3"
         )
@@ -243,6 +266,8 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertEqual(metadata.end_at, "2026-04-14 00:00:00")
 
     def test_execute_liveatc_download_inferrs_metadata_from_file_name(self) -> None:
+        """验证 LiveATC 下载入口可以自动推断元数据并入库。"""
+
         fixture = self.root / "VHHH5-App-Dep-Dir-Zone-Apr-09-2026-0630Z.mp3"
         build_mp3(fixture, 2)
 
@@ -261,6 +286,8 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertTrue(Path(record["file_path"]).exists())
 
     def test_import_liveatc_archive_limits_metadata_and_file_to_30_minutes(self) -> None:
+        """验证超长 LiveATC 文件会被截断到前 30 分钟。"""
+
         fixture = self.root / "VHHH5-App-Dep-Dir-Zone-Apr-09-2026-0630Z.mp3"
         build_mp3(fixture, 1805)
 
@@ -274,6 +301,8 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertGreaterEqual(stored_duration, 1798)
 
     def test_metadata_sync_marks_missing_files(self) -> None:
+        """验证同步服务能识别数据库有记录但磁盘文件缺失的情况。"""
+
         fixture = self.root / "sync.wav"
         build_wav(fixture, 2, 500.0)
         service = DownloadTaskService()
@@ -305,6 +334,8 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertEqual(refreshed["valid_status"], "missing")
 
     def test_create_realtime_task_from_asx_extracts_stream_url(self) -> None:
+        """验证 ASX 解析后可以创建出带真实流地址的实时任务。"""
+
         result = RealtimeTaskService().create_task_from_asx(
             task_name="live-stream-demo",
             icao_code="ZBAA",

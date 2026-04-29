@@ -1,3 +1,10 @@
+"""接口请求与响应模型定义。
+
+把参数校验前置到这一层有两个好处：
+1. API 层不用手动写大量 `if` 判断，代码更干净。
+2. 非法参数会在进入业务逻辑前就被拦住，减少后续出错分支。
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -9,6 +16,13 @@ from app.core.time_utils import parse_datetime
 
 
 class VoiceRecord(BaseModel):
+    """语音文件元数据记录。
+
+    这是系统内部最核心的一类数据：
+    一条记录既描述一个物理音频文件，也描述它对应的机场、频段、
+    原始时间、处理时间、起止范围和有效状态。
+    """
+
     unique_id: str
     icao_code: str
     band: str
@@ -26,6 +40,12 @@ class VoiceRecord(BaseModel):
 
 
 class RealtimeTaskCreate(BaseModel):
+    """创建实时接收任务时使用的请求模型。
+
+    实时任务既可以走传统 socket 连接，也可以直接走 HTTP 流地址，
+    所以这里同时保留了两类输入字段。
+    """
+
     task_name: str
     server_addr: str | None = None
     server_port: int | None = None
@@ -52,6 +72,12 @@ class RealtimeTaskCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> "RealtimeTaskCreate":
+        """实时任务必须提供 socket 地址或 HTTP 流地址。
+
+        这条校验规则保证任务创建出来后一定“有东西可连”，
+        否则后面的监控线程和接收线程都没法真正工作。
+        """
+
         has_socket_target = bool(self.server_addr) and self.server_port is not None
         if not has_socket_target and not self.source_url:
             raise ValueError("either source_url or server_addr/server_port must be provided")
@@ -59,6 +85,8 @@ class RealtimeTaskCreate(BaseModel):
 
 
 class DownloadTaskCreate(BaseModel):
+    """创建历史下载任务时使用的请求模型。"""
+
     task_name: str
     icao_code: str = Field(min_length=4, max_length=4)
     band: str
@@ -84,6 +112,13 @@ class DownloadTaskCreate(BaseModel):
 
 
 class DownloadExecuteRequest(BaseModel):
+    """执行普通历史文件下载时使用的请求模型。
+
+    这里允许时间和机场信息为空，是为了兼容两种场景：
+    1. 手工传入完整元数据。
+    2. 只传 URL，由系统后续从 LiveATC 文件名自动推断。
+    """
+
     task_id: int
     source_url: str
     icao_code: str | None = Field(default=None, min_length=4, max_length=4)
@@ -100,25 +135,35 @@ class DownloadExecuteRequest(BaseModel):
 
 
 class LiveAtcDownloadExecuteRequest(BaseModel):
+    """执行 LiveATC 归档下载时使用的请求模型。"""
+
     source_url: str
     speed_limit_kbps: int = 0
 
 
 class LiveAtcImportedFileRequest(BaseModel):
+    """导入 LiveATC 归档文件时可选关联的任务信息。"""
+
     task_id: int | None = None
 
 
 class RealtimeMonitorRequest(BaseModel):
+    """启动实时监控线程时使用的请求模型。"""
+
     task_id: int
     heartbeat_payload: str = "PING\n"
     heartbeat_expect: str | None = None
 
 
 class RealtimeReceiveRequest(BaseModel):
+    """启动实时接收线程时使用的请求模型。"""
+
     task_id: int
 
 
 class RealtimeAsxCreate(BaseModel):
+    """通过上传 ASX 文件创建实时任务时使用的请求模型。"""
+
     task_name: str
     icao_code: str = Field(min_length=4, max_length=4)
     band: str
@@ -141,6 +186,12 @@ class RealtimeAsxCreate(BaseModel):
 
 
 class VoiceQueryRequest(BaseModel):
+    """按时间范围查询语音元数据时使用的请求模型。
+
+    这是 A-2 最核心的查询入口，约束了分页参数必须为正数，
+    同时强制结束时间不能早于开始时间。
+    """
+
     startTime: str
     endTime: str
     icaoCode: str | None = None
@@ -165,6 +216,12 @@ class VoiceQueryRequest(BaseModel):
 
 
 class VoiceSliceRequest(BaseModel):
+    """按时间范围裁剪并导出语音时使用的请求模型。
+
+    和普通查询相比，这里多了 `outputFormat`，
+    表示最终导出的音频格式是 `wav` 还是 `mp3`。
+    """
+
     startTime: str
     endTime: str
     icaoCode: str
@@ -186,6 +243,8 @@ class VoiceSliceRequest(BaseModel):
 
 
 class IntegrationAudioQueryRequest(BaseModel):
+    """面向上层系统的语音查询请求模型。"""
+
     unique_id: str | None = None
     icao_code: str | None = Field(default=None, min_length=4, max_length=4)
     band: str | None = None
@@ -214,6 +273,8 @@ class IntegrationAudioQueryRequest(BaseModel):
 
 
 class IntegrationRealtimeTaskQueryRequest(BaseModel):
+    """面向上层系统的实时任务查询请求模型。"""
+
     icao_code: str | None = Field(default=None, min_length=4, max_length=4)
     band: str | None = None
     status: int | None = None
@@ -234,6 +295,8 @@ class IntegrationRealtimeTaskQueryRequest(BaseModel):
 
 
 class IntegrationDownloadTaskQueryRequest(BaseModel):
+    """面向上层系统的下载任务查询请求模型。"""
+
     icao_code: str | None = Field(default=None, min_length=4, max_length=4)
     band: str | None = None
     status: int | None = None
@@ -254,6 +317,8 @@ class IntegrationDownloadTaskQueryRequest(BaseModel):
 
 
 class IntegrationRealtimeTaskUpsertRequest(BaseModel):
+    """面向上层系统的实时任务新增或更新模型。"""
+
     task_id: int | None = None
     task_name: str
     server_addr: str | None = None
@@ -282,6 +347,8 @@ class IntegrationRealtimeTaskUpsertRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> "IntegrationRealtimeTaskUpsertRequest":
+        """集成侧实时任务同样必须提供可连接的数据源。"""
+
         has_socket_target = bool(self.server_addr) and self.server_port is not None
         if not has_socket_target and not self.source_url:
             raise ValueError("either source_url or server_addr/server_port must be provided")
@@ -289,6 +356,8 @@ class IntegrationRealtimeTaskUpsertRequest(BaseModel):
 
 
 class IntegrationDownloadTaskUpsertRequest(BaseModel):
+    """面向上层系统的下载任务新增或更新模型。"""
+
     task_id: int | None = None
     task_name: str
     icao_code: str = Field(min_length=4, max_length=4)
@@ -316,6 +385,8 @@ class IntegrationDownloadTaskUpsertRequest(BaseModel):
 
 
 class A2SystemConfigUpdateRequest(BaseModel):
+    """更新系统基础配置时使用的请求模型。"""
+
     storage_root: str
     slice_rule: str
     max_download_task: int
@@ -325,6 +396,15 @@ class A2SystemConfigUpdateRequest(BaseModel):
 
 
 class ApiResponse(BaseModel):
+    """统一的接口响应包装结构。
+
+    项目所有接口都尽量返回统一外壳，方便前端和集成系统处理：
+    - `code` 表示状态码语义
+    - `msg` 表示文本信息
+    - `data` 表示实际业务数据
+    - `count` 表示记录数或结果数
+    """
+
     code: int = 200
     msg: str = "success"
     data: object | list[object] | dict[str, Any] | None = None

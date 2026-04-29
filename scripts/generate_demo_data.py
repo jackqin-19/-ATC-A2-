@@ -1,3 +1,9 @@
+"""演示数据生成脚本。
+
+这个脚本会在本地生成几段测试 WAV 音频，并按照正式业务流程写入系统，
+用于课堂演示或接口联调。
+"""
+
 from __future__ import annotations
 
 import math
@@ -19,6 +25,8 @@ FIXTURES_DIR = ROOT / "storage" / "fixtures"
 
 
 def build_wav(path: Path, seconds: int, freq: float) -> None:
+    """生成一段指定频率和时长的测试 WAV 音频。"""
+
     sample_rate = 8000
     frames: list[bytes] = []
     for i in range(sample_rate * seconds):
@@ -32,6 +40,8 @@ def build_wav(path: Path, seconds: int, freq: float) -> None:
 
 
 def main() -> None:
+    """初始化数据库并写入一组可直接查询和切片的演示数据。"""
+
     init_db()
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -56,6 +66,7 @@ def main() -> None:
     for file_name, seconds, freq, start_at, end_at in segments:
         file_path = FIXTURES_DIR / file_name
         build_wav(file_path, seconds, freq)
+        # 通过正式的下载任务入库流程写入演示数据，保证结构和真实数据一致。
         task_service.ingest_downloaded_file(
             task_id=task_id,
             source_file=file_path,
