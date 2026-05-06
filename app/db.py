@@ -1,9 +1,12 @@
 """数据库初始化与连接管理。
 
 这一层解决三个问题：
-1. 第一次启动项目时自动建表。
-2. 老版本数据库缺字段时自动补齐，避免升级后直接报错。
+1. 确保数据目录、临时目录存在。
+2. 如果数据库表尚未由 Alpha A-5 创建，则按兼容模式自建。
 3. 给 Repository 层提供统一的连接获取方式，减少重复代码。
+
+说明：生产环境由 Alpha A-5 侧通过 SQLAlchemy 统一管理表结构，
+但本模块保留 CREATE TABLE IF NOT EXISTS 以兼容独立运行和测试场景。
 """
 
 from __future__ import annotations
@@ -35,30 +38,6 @@ CREATE INDEX IF NOT EXISTS idx_voice_info_icao ON a2_voice_info(icao_code);
 CREATE INDEX IF NOT EXISTS idx_voice_info_band ON a2_voice_info(band);
 CREATE INDEX IF NOT EXISTS idx_voice_info_time ON a2_voice_info(original_time);
 CREATE INDEX IF NOT EXISTS idx_voice_info_range ON a2_voice_info(start_at, end_at);
-
-CREATE TABLE IF NOT EXISTS adsb_tracks (
-    track_id TEXT PRIMARY KEY,
-    callsign TEXT,
-    location TEXT,
-    altitude INTEGER,
-    ground_speed INTEGER,
-    heading INTEGER,
-    timestamp TEXT,
-    icao_code TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_adsb_callsign ON adsb_tracks(callsign);
-CREATE INDEX IF NOT EXISTS idx_adsb_timestamp ON adsb_tracks(timestamp);
-CREATE INDEX IF NOT EXISTS idx_adsb_icao_timestamp ON adsb_tracks(icao_code, timestamp);
-
-CREATE TABLE IF NOT EXISTS a2_voice_track_rel (
-    rel_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    unique_id TEXT,
-    track_id TEXT,
-    create_time TEXT DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_rel_unique_id ON a2_voice_track_rel(unique_id);
-CREATE INDEX IF NOT EXISTS idx_rel_track_id ON a2_voice_track_rel(track_id);
 
 CREATE TABLE IF NOT EXISTS a2_task_realtime_cfg (
     task_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,11 +87,7 @@ CREATE TABLE IF NOT EXISTS a2_sys_base_cfg (
 
 
 def ensure_dirs() -> None:
-    """确保数据目录、临时目录和数据库目录存在。
-
-    因为项目既要写 SQLite 文件，也要写音频文件和临时切片文件，
-    所以在真正执行业务前先把目录准备好，避免首次写文件时报路径不存在。
-    """
+    """确保数据目录、临时目录和数据库目录存在。"""
 
     settings.data_root.mkdir(parents=True, exist_ok=True)
     settings.temp_root.mkdir(parents=True, exist_ok=True)
@@ -120,12 +95,7 @@ def ensure_dirs() -> None:
 
 
 def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    """在旧表缺失字段时执行兼容性补列。
-
-    这是一个轻量级“数据库版本兼容”处理：
-    如果用户之前已经运行过旧版本代码，这里会检查新字段是否缺失，
-    缺的话再补，不强制删除旧库重建。
-    """
+    """在旧表缺失字段时执行兼容性补列。"""
 
     existing_columns = {
         row[1]
@@ -136,11 +106,10 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition:
 
 
 def init_db() -> None:
-    """初始化数据库表结构，并写入默认系统配置。
+    """初始化数据库环境并写入默认系统配置。
 
-    这里除了执行建表 SQL，还会：
-    1. 给历史数据库补充 `source_url / segment_seconds / stream_format` 字段。
-    2. 初始化一条系统基础配置记录，供集成接口读取和更新。
+    使用 CREATE TABLE IF NOT EXISTS，这样如果 Alpha 已建表就是空操作，
+    如果 ATC-A2 独立运行也能自建表兼容。
     """
 
     ensure_dirs()
@@ -171,13 +140,7 @@ def init_db() -> None:
 
 @contextmanager
 def get_conn():
-    """提供自动提交和关闭的数据库连接上下文。
-
-    Repository 层通过 `with get_conn()` 使用连接，这样可以统一做到：
-    - 使用前确保数据库已初始化。
-    - 正常结束后自动提交。
-    - 无论是否异常，最终都关闭连接。
-    """
+    """提供自动提交和关闭的数据库连接上下文。"""
 
     init_db()
     conn = sqlite3.connect(settings.db_path)

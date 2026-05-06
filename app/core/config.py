@@ -26,7 +26,7 @@ class Settings:
     app_version: str = "1.0.0"
     workspace_root: Path = Path(os.getenv("A2_WORKSPACE_ROOT", Path.cwd()))
     data_root: Path = Path(os.getenv("A2_DATA_ROOT", Path.cwd() / "storage"))
-    db_path: Path = Path(os.getenv("A2_DB_PATH", Path.cwd() / "storage" / "a2.sqlite3"))
+    db_path: Path = Path(os.getenv("A2_DB_PATH", Path(os.getenv("A5_DB_PATH", str(Path.cwd().parent / "Alpha" / "data" / "alpha_a5.db")))))
     temp_root: Path = Path(os.getenv("A2_TEMP_ROOT", Path.cwd() / "storage" / "tmp"))
     default_slice_minutes: int = int(os.getenv("A2_SLICE_MINUTES", "5"))
     default_slice_mb: int = int(os.getenv("A2_SLICE_MB", "100"))

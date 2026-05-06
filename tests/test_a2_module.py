@@ -98,8 +98,8 @@ class A2ModuleTestCase(unittest.TestCase):
         if self.root.exists():
             shutil.rmtree(self.root, ignore_errors=True)
 
-    def test_query_voice_returns_overlapping_segments_and_track_ids(self) -> None:
-        """验证按时间范围查询时，能返回重叠片段和关联航迹。"""
+    def test_query_voice_returns_overlapping_segments(self) -> None:
+        """验证按时间范围查询时，能返回时间重叠的语音片段。"""
 
         service = DownloadTaskService()
         fixture_1 = self.root / "seg1.wav"
@@ -135,17 +135,6 @@ class A2ModuleTestCase(unittest.TestCase):
             original_time="2026-04-06 10:00:05",
         )
 
-        with sqlite3.connect(settings.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO adsb_tracks (
-                    track_id, callsign, location, altitude, ground_speed, heading, timestamp, icao_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                ("track-1", "CCA123", "POINT(0 0)", 1000, 200, 90, "2026-04-06 10:00:03", "ZBAA"),
-            )
-            conn.commit()
-
         total, rows = QueryService().query_voice(
             VoiceQueryRequest(
                 startTime="2026-04-06 10:00:02",
@@ -160,7 +149,7 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertEqual(total, 2)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["unique_id"], record_1["unique_id"])
-        self.assertIn("track-1", rows[0]["trackIds"])
+        self.assertIn("downloadUrl", rows[0])
 
     def test_audio_service_composes_cross_segment_wav(self) -> None:
         """验证跨多个片段的 WAV 查询可以被正确拼接。"""

@@ -198,11 +198,7 @@ class VoiceRepository:
         file_size: int | None = None,
         checksum: str | None = None,
     ) -> None:
-        """更新语音记录的有效状态、文件大小和校验值。
-
-        这个方法主要服务于同步修复逻辑：
-        当磁盘文件丢失、大小不一致或校验和变化时，用它回写数据库状态。
-        """
+        """更新语音记录的有效状态、文件大小和校验值。"""
 
         fields = ["valid_status = ?"]
         params: list[Any] = [valid_status]
@@ -218,38 +214,6 @@ class VoiceRepository:
                 f"UPDATE a2_voice_info SET {', '.join(fields)} WHERE unique_id = ?",
                 tuple(params),
             )
-
-    def upsert_voice_track_rel(self, unique_id: str, track_id: str) -> None:
-        """建立语音和航迹的关联关系，已存在则不重复插入。
-
-        这里没有直接使用数据库唯一约束，而是先查后插，
-        目的是让逻辑更直观，也避免重复关联数据不断膨胀。
-        """
-
-        with get_conn() as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM a2_voice_track_rel WHERE unique_id = ? AND track_id = ?",
-                (unique_id, track_id),
-            ).fetchone()
-            if not exists:
-                conn.execute(
-                    "INSERT INTO a2_voice_track_rel (unique_id, track_id) VALUES (?, ?)",
-                    (unique_id, track_id),
-                )
-
-    def find_tracks(self, icao_code: str, start_time: str, end_time: str) -> list[str]:
-        """查找指定机场和时间范围内的航迹 ID。"""
-
-        with get_conn() as conn:
-            rows = conn.execute(
-                """
-                SELECT track_id FROM adsb_tracks
-                WHERE icao_code = ? AND timestamp BETWEEN ? AND ?
-                ORDER BY timestamp ASC
-                """,
-                (icao_code, start_time, end_time),
-            ).fetchall()
-        return [row["track_id"] for row in rows]
 
 
 class TaskRepository:
