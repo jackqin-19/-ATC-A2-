@@ -38,6 +38,7 @@ from app.schemas import (
     VoiceSliceRequest,
 )
 from app.services.audio_service import AudioService
+from app.services.exception import ATCError
 from app.services.query_service import QueryService
 from app.services.runtime_service import RealtimeConnectionManager
 from app.services.sync_service import MetadataSyncService
@@ -295,7 +296,7 @@ def execute_liveatc_download(payload: LiveAtcDownloadExecuteRequest) -> ApiRespo
 
     try:
         result = download_service.execute_liveatc_download(payload)
-    except ValueError as exc:
+    except (ATCError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ApiResponse(data=result, count=1)
 

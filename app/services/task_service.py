@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import math
 import random
 import shutil
 import socket
@@ -30,6 +29,8 @@ from app.schemas import (
     LiveAtcDownloadExecuteRequest,
     RealtimeTaskCreate,
 )
+from app.services.exception import ATCDownloadError
+from app.services.liveatc_downloader import ArchiveDownloader
 from app.services.runtime_service import AsxStreamResolver
 from app.services.storage_service import StorageService
 
@@ -248,25 +249,61 @@ class DownloadTaskService:
         return record.model_dump()
 
     def execute_liveatc_download(self, payload: LiveAtcDownloadExecuteRequest) -> dict:
-        """执行 LiveATC 下载入口。
+        """通过浏览器自动化从 LiveATC 归档页面下载语音。
 
-        这里会先从文件名创建任务和推断元数据，再复用普通 HTTP 下载流程。
+        使用 SeleniumBase 绕过 Cloudflare，模拟用户在归档页面选择日期和时段后触发下载。
         """
 
-        source_name = Path(urlparse(payload.source_url).path).name
-        task_id, metadata = self.create_task_from_liveatc_archive(source_name)
-        execute_payload = DownloadExecuteRequest(
+        download_dir = settings.temp_root / "downloads"
+        download_dir.mkdir(parents=True, exist_ok=True)
+        downloader = ArchiveDownloader(
+            url=payload.source_url,
+            date=payload.date,
+            time_slot=payload.time_slot,
+            file_dir=download_dir,
+        )
+        try:
+            file_path = downloader.run()
+        except Exception as exc:
+            raise ATCDownloadError(str(exc)) from exc
+
+        source_file = self._limit_liveatc_archive_file(file_path)
+        metadata = payload.icao_code and payload.band and self._try_manual_metadata(payload, source_file)
+        if metadata is None:
+            metadata = self.parse_liveatc_archive_metadata(source_file.name, source_file=source_file)
+        task_id, _ = self.create_task_from_liveatc_archive(source_file.name)
+        self.task_repo.update_download_task_time_range(task_id, metadata.start_at, metadata.end_at)
+        record = self.ingest_downloaded_file(
             task_id=task_id,
-            source_url=payload.source_url,
+            source_file=source_file,
             icao_code=metadata.icao_code,
             band=metadata.band,
-            start_time=None,
-            end_time=None,
+            start_at=metadata.start_at,
+            end_at=metadata.end_at,
             original_time=metadata.original_time,
-            speed_limit_kbps=payload.speed_limit_kbps,
         )
-        record = self.execute_http_download(execute_payload)
+        try:
+            source_file.unlink(missing_ok=True)
+        except OSError:
+            pass
         return {"taskId": task_id, "record": record, "metadata": metadata.__dict__}
+
+    def _try_manual_metadata(
+        self, payload: LiveAtcDownloadExecuteRequest, source_file: Path
+    ) -> LiveAtcArchiveMetadata | None:
+        if not payload.icao_code or not payload.band:
+            return None
+        duration = self._probe_audio_duration_seconds(source_file) or 0
+        start_dt = parse_datetime(payload.date + "000000")
+        end_dt = start_dt + timedelta(seconds=min(duration, self.MAX_LIVEATC_ARCHIVE_SECONDS))
+        return LiveAtcArchiveMetadata(
+            icao_code=payload.icao_code.upper(),
+            band=payload.band,
+            original_time=format_datetime(start_dt, with_ms=False),
+            start_at=format_datetime(start_dt, with_ms=False),
+            end_at=format_datetime(end_dt, with_ms=False),
+            file_name=source_file.name,
+        )
 
     def execute_http_download(self, payload: DownloadExecuteRequest) -> dict:
         """执行普通 HTTP 下载，支持简单断点续传和限速。

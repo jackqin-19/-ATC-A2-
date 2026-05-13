@@ -135,10 +135,23 @@ class DownloadExecuteRequest(BaseModel):
 
 
 class LiveAtcDownloadExecuteRequest(BaseModel):
-    """执行 LiveATC 归档下载时使用的请求模型。"""
+    """执行 LiveATC 归档下载时使用的请求模型。
+
+    source_url 应为 LiveATC 归档页面地址（如 https://www.liveatc.net/archive.php?m=vhhh5），
+    系统将通过浏览器自动化选择日期/时段并触发下载。
+    """
 
     source_url: str
+    date: str
+    time_slot: str = Field(alias="time")
+    icao_code: str | None = Field(default=None, min_length=4, max_length=4)
+    band: str | None = None
     speed_limit_kbps: int = 0
+
+    @field_validator("icao_code")
+    @classmethod
+    def upper_icao(cls, value: str | None) -> str | None:
+        return value.upper() if value else value
 
 
 class LiveAtcImportedFileRequest(BaseModel):

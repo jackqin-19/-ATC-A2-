@@ -17,6 +17,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+import requests
+
 from app.core.time_utils import format_datetime, utcnow_text
 from app.repositories import TaskRepository, VoiceRepository
 from app.services.storage_service import StorageService
@@ -234,7 +236,15 @@ class RealtimeConnectionManager:
                 self._receive_state[task_id]["streamUrl"] = stream_url
                 self._receive_state[task_id]["lastError"] = None
                 self.repository.update_realtime_status(task_id, 1)
-                self._record_stream(task, stream_url, stop_event)
+                extra_headers: dict[str, str] = {}
+                extra_cookies: dict[str, str] = {}
+                parsed = urlparse(str(task["source_url"]))
+                if "liveatc.net" in (parsed.netloc or ""):
+                    stream_url, extra_headers, extra_cookies = self._resolve_liveatc_stream_url(
+                        str(task["source_url"])
+                    )
+                    self._receive_state[task_id]["streamUrl"] = stream_url
+                self._record_stream(task, stream_url, stop_event, extra_headers, extra_cookies)
                 if stop_event.is_set():
                     break
                 backoff_index = 0
@@ -251,6 +261,13 @@ class RealtimeConnectionManager:
                 break
         self.repository.update_realtime_status(task_id, 0)
 
+    @staticmethod
+    def _resolve_liveatc_stream_url(source_url: str) -> tuple[str, dict[str, str], dict[str, str]]:
+        from app.services.liveatc_downloader import StreamDownloader
+
+        sd = StreamDownloader(source_url, Path("."))
+        return sd.resolve_stream_url()
+
     def _resolve_stream_url(self, source_url: str) -> str:
         """如果传入的是 ASX 地址，就先解析出真实流地址。"""
 
@@ -261,19 +278,40 @@ class RealtimeConnectionManager:
             return refs[0]
         return source_url
 
-    def _record_stream(self, task: dict[str, object], stream_url: str, stop_event: threading.Event) -> None:
+    def _record_stream(
+        self,
+        task: dict[str, object],
+        stream_url: str,
+        stop_event: threading.Event,
+        extra_headers: dict[str, str] | None = None,
+        extra_cookies: dict[str, str] | None = None,
+    ) -> None:
         """持续读取流内容，并按固定秒数切成多个语音片段。"""
+
+        extension = self._guess_extension(
+            stream_url=stream_url,
+            content_type=None,
+            declared_format=task.get("stream_format"),
+        )
+        segment_seconds = int(task.get("segment_seconds") or 60)
+        current_bytes = bytearray()
+        segment_start = datetime.now(UTC)
+
+        if extra_headers is not None and extra_headers:
+            self._record_stream_via_requests(
+                task, stream_url, stop_event, extension, segment_seconds,
+                extra_headers, extra_cookies or {},
+            )
+            return
 
         request = urllib.request.Request(stream_url, headers={"User-Agent": "ATC-A2/1.0"})
         with urllib.request.urlopen(request, timeout=int(task.get("timeout") or 30)) as response:
+            content_type = response.headers.get("Content-Type")
             extension = self._guess_extension(
                 stream_url=stream_url,
-                content_type=response.headers.get("Content-Type"),
+                content_type=content_type,
                 declared_format=task.get("stream_format"),
             )
-            segment_seconds = int(task.get("segment_seconds") or 60)
-            current_bytes = bytearray()
-            segment_start = datetime.now(UTC)
             while not stop_event.is_set():
                 if hasattr(response, "read1"):
                     chunk = response.read1(4096)
@@ -284,14 +322,49 @@ class RealtimeConnectionManager:
                 current_bytes.extend(chunk)
                 now = datetime.now(UTC)
                 if (now - segment_start).total_seconds() >= segment_seconds:
-                    # 达到切片时长后，立即落盘一个片段。
                     self._save_segment(task, bytes(current_bytes), segment_start, now, extension)
                     current_bytes = bytearray()
                     segment_start = now
             if current_bytes:
-                # 停止前剩余的尾部数据也要保存，避免丢音。
                 end_time = datetime.now(UTC)
                 self._save_segment(task, bytes(current_bytes), segment_start, end_time, extension)
+
+    def _record_stream_via_requests(
+        self,
+        task: dict[str, object],
+        stream_url: str,
+        stop_event: threading.Event,
+        extension: str,
+        segment_seconds: int,
+        headers: dict[str, str],
+        cookies: dict[str, str],
+    ) -> None:
+        current_bytes = bytearray()
+        segment_start = datetime.now(UTC)
+        response = requests.get(
+            stream_url, headers=headers, cookies=cookies, stream=True, timeout=30
+        )
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type")
+        extension = self._guess_extension(
+            stream_url=stream_url,
+            content_type=content_type,
+            declared_format=task.get("stream_format"),
+        )
+        for chunk in response.iter_content(chunk_size=4096):
+            if stop_event.is_set():
+                break
+            if not chunk:
+                break
+            current_bytes.extend(chunk)
+            now = datetime.now(UTC)
+            if (now - segment_start).total_seconds() >= segment_seconds:
+                self._save_segment(task, bytes(current_bytes), segment_start, now, extension)
+                current_bytes = bytearray()
+                segment_start = now
+        if current_bytes:
+            end_time = datetime.now(UTC)
+            self._save_segment(task, bytes(current_bytes), segment_start, end_time, extension)
 
     def _save_segment(
         self,

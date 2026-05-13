@@ -33,6 +33,16 @@ class Settings:
     sync_interval_seconds: int = int(os.getenv("A2_SYNC_INTERVAL_SECONDS", "300"))
     max_download_task: int = int(os.getenv("A2_MAX_DOWNLOAD_TASK", "3"))
     max_realtime_conn: int = int(os.getenv("A2_MAX_REALTIME_CONN", "5"))
+    download_chunk_size: int = 1024 * 16
+    download_timeout: int = int(os.getenv("A2_DOWNLOAD_TIMEOUT", "600"))
+    stream_timeout: int = int(os.getenv("A2_STREAM_TIMEOUT", "30"))
+    fresh_time: int = int(os.getenv("A2_FRESH_TIME", "10"))
+    max_retry: int = int(os.getenv("A2_MAX_RETRY", "10"))
+    wait_timeout: int = int(os.getenv("A2_WAIT_TIMEOUT", "60"))
+    timewait: int = int(os.getenv("A2_TIMEWAIT", "1"))
+    audio_loudness: float = float(os.getenv("A2_LOUDNESS", "-24.0"))
+    audio_sample_rate: int = int(os.getenv("A2_SAMPLE_RATE", "16000"))
+    audio_bit_depth: int = int(os.getenv("A2_BIT_DEPTH", "16"))
 
 
 settings = Settings()

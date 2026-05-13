@@ -255,19 +255,24 @@ class A2ModuleTestCase(unittest.TestCase):
         self.assertEqual(metadata.end_at, "2026-04-14 00:00:00")
 
     def test_execute_liveatc_download_inferrs_metadata_from_file_name(self) -> None:
-        """验证 LiveATC 下载入口可以自动推断元数据并入库。"""
+        """验证 SeleniumBase 下载完成后，元数据推断与入库流程正确。"""
 
         fixture = self.root / "VHHH5-App-Dep-Dir-Zone-Apr-09-2026-0630Z.mp3"
         build_mp3(fixture, 2)
 
-        result = DownloadTaskService().execute_liveatc_download(
-            LiveAtcDownloadExecuteRequest(
-                source_url=fixture.resolve().as_uri(),
+        from unittest.mock import patch
+        from app.services.liveatc_downloader import ArchiveDownloader
+
+        with patch.object(ArchiveDownloader, "run", return_value=fixture):
+            result = DownloadTaskService().execute_liveatc_download(
+                LiveAtcDownloadExecuteRequest(
+                    source_url="https://www.liveatc.net/archive.php?m=vhhh5",
+                    date="20260409",
+                    time="0630-0700Z",
+                )
             )
-        )
 
         record = result["record"]
-        self.assertEqual(result["taskId"], 1)
         self.assertEqual(record["icao_code"], "VHHH")
         self.assertEqual(record["band"], "app-dep-dir-zone")
         self.assertEqual(record["start_at"], "2026-04-09 06:30:00")

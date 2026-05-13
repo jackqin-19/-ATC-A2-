@@ -458,58 +458,62 @@ class A2ApiTestCase(unittest.TestCase):
     def test_execute_liveatc_download_persists_file_and_supports_time_range_query(self) -> None:
         """验证 LiveATC 下载、入库、查询和文件回传整条链路。"""
 
-        server, thread = self.start_stream_server()
-        try:
+        from unittest.mock import patch
+
+        fixture = self.root / "VHHH9-Del-Gnd-Twr-Dir-Apr-14-2026-0000Z.mp3"
+        fixture.write_bytes(build_mp3_bytes(2))
+
+        with patch("app.services.liveatc_downloader.ArchiveDownloader.run", return_value=fixture):
             response = self.client.post(
                 "/api/a2/tasks/download/liveatc/execute",
-                json={"source_url": f"http://127.0.0.1:{server.server_address[1]}{server.archive_path}"},
-            )
-            self.assertEqual(response.status_code, 200)
-
-            payload = response.json()["data"]
-            record = payload["record"]
-            stored_path = Path(record["file_path"])
-            self.assertTrue(stored_path.exists())
-            self.assertIn(str(self.root / "data" / "VHHH" / "del-gnd-twr-dir" / "2026-04-14"), str(stored_path))
-            self.assertEqual(record["start_at"], "2026-04-14 00:00:00")
-            self.assertEqual(record["end_at"], "2026-04-14 00:00:02")
-
-            with sqlite3.connect(settings.db_path) as conn:
-                row = conn.execute(
-                    "SELECT progress, status, start_time, end_time FROM a2_task_download_cfg WHERE task_id = ?",
-                    (payload["taskId"],),
-                ).fetchone()
-            self.assertEqual(row[0], 100.0)
-            self.assertEqual(row[1], 1)
-            self.assertEqual(row[2], "2026-04-14 00:00:00")
-            self.assertEqual(row[3], "2026-04-14 00:00:02")
-
-            query_response = self.client.get(
-                "/api/a2/voice/query",
-                params={
-                    "startTime": "2026-04-14 00:00:01",
-                    "endTime": "2026-04-14 00:00:03",
-                    "icaoCode": "VHHH",
-                    "band": "del-gnd-twr-dir",
-                    "pageNum": 1,
-                    "pageSize": 10,
+                json={
+                    "source_url": "https://www.liveatc.net/archive.php?m=vhhh5",
+                    "date": "20260414",
+                    "time": "0000-0030Z",
                 },
             )
-            self.assertEqual(query_response.status_code, 200)
-            query_payload = query_response.json()
-            self.assertEqual(query_payload["count"], 1)
-            self.assertEqual(query_payload["data"][0]["downloadUrl"], f"/api/a2/voice/file/{record['unique_id']}")
+        self.assertEqual(response.status_code, 200)
 
-            file_response = self.client.get(query_payload["data"][0]["downloadUrl"])
-            self.assertEqual(file_response.status_code, 200)
-            self.assertGreater(len(file_response.content), 0)
-            download_dir = settings.temp_root / "downloads"
-            remaining = [entry for entry in download_dir.rglob("*") if entry.is_file()] if download_dir.exists() else []
-            self.assertEqual(remaining, [])
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
+        payload = response.json()["data"]
+        record = payload["record"]
+        stored_path = Path(record["file_path"])
+        self.assertTrue(stored_path.exists())
+        self.assertIn(str(self.root / "data" / "VHHH" / "del-gnd-twr-dir" / "2026-04-14"), str(stored_path))
+        self.assertEqual(record["start_at"], "2026-04-14 00:00:00")
+        self.assertEqual(record["end_at"], "2026-04-14 00:00:02")
+
+        with sqlite3.connect(settings.db_path) as conn:
+            row = conn.execute(
+                "SELECT progress, status, start_time, end_time FROM a2_task_download_cfg WHERE task_id = ?",
+                (payload["taskId"],),
+            ).fetchone()
+        self.assertEqual(row[0], 100.0)
+        self.assertEqual(row[1], 1)
+        self.assertEqual(row[2], "2026-04-14 00:00:00")
+        self.assertEqual(row[3], "2026-04-14 00:00:02")
+
+        query_response = self.client.get(
+            "/api/a2/voice/query",
+            params={
+                "startTime": "2026-04-14 00:00:01",
+                "endTime": "2026-04-14 00:00:03",
+                "icaoCode": "VHHH",
+                "band": "del-gnd-twr-dir",
+                "pageNum": 1,
+                "pageSize": 10,
+            },
+        )
+        self.assertEqual(query_response.status_code, 200)
+        query_payload = query_response.json()
+        self.assertEqual(query_payload["count"], 1)
+        self.assertEqual(query_payload["data"][0]["downloadUrl"], f"/api/a2/voice/file/{record['unique_id']}")
+
+        file_response = self.client.get(query_payload["data"][0]["downloadUrl"])
+        self.assertEqual(file_response.status_code, 200)
+        self.assertGreater(len(file_response.content), 0)
+        download_dir = settings.temp_root / "downloads"
+        remaining = [entry for entry in download_dir.rglob("*") if entry.is_file()] if download_dir.exists() else []
+        self.assertEqual(remaining, [])
 
     def test_import_liveatc_history_file_truncates_to_first_30_minutes(self) -> None:
         """验证超长 LiveATC 导入会被裁成前 30 分钟。"""
