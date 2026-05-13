@@ -49,7 +49,6 @@ class MetadataSyncService:
         for record in records:
             path = Path(record["file_path"])
             if not path.exists():
-                # 数据库里有记录但磁盘上文件已丢失，标记为 missing。
                 self.repository.update_voice_status(record["unique_id"], valid_status="missing")
                 missing += 1
                 continue
@@ -57,7 +56,6 @@ class MetadataSyncService:
             size = path.stat().st_size
             status = "valid"
             if record.get("file_size") != size or record.get("checksum") != checksum or record.get("valid_status") != status:
-                # 文件还在，但元数据落后于真实状态时进行修正。
                 self.repository.update_voice_status(
                     record["unique_id"],
                     valid_status=status,
@@ -65,7 +63,31 @@ class MetadataSyncService:
                     checksum=checksum,
                 )
                 updated += 1
-        return {"missing": missing, "updated": updated, "scanned": len(records)}
+
+        orphans = self._clean_orphan_files()
+
+        return {"missing": missing, "updated": updated, "scanned": len(records), "orphansCleaned": orphans}
+
+    def _clean_orphan_files(self) -> int:
+        """扫描磁盘上 DB 没有记录的孤儿语音文件，予以删除。"""
+        cleaned = 0
+        data_root = settings.data_root
+        if not data_root.exists():
+            return 0
+        for file_path in data_root.rglob("*"):
+            if not file_path.is_file():
+                continue
+            suffix = file_path.suffix.lower()
+            if suffix not in (".wav", ".mp3", ".aac"):
+                continue
+            try:
+                resolved = str(file_path.resolve())
+            except OSError:
+                continue
+            if not self.repository.voice_record_exists_by_path(resolved):
+                file_path.unlink(missing_ok=True)
+                cleaned += 1
+        return cleaned
 
     def _run_loop(self) -> None:
         """按配置的时间间隔循环执行同步。"""

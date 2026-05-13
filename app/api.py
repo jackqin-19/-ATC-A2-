@@ -39,6 +39,7 @@ from app.schemas import (
 )
 from app.services.audio_service import AudioService
 from app.services.exception import ATCError
+from app.services.liveatc_downloader import cleanup_temp_files, shutdown_browser
 from app.services.query_service import QueryService
 from app.services.runtime_service import RealtimeConnectionManager
 from app.services.sync_service import MetadataSyncService
@@ -124,12 +125,13 @@ async def lifespan(_: FastAPI):
     """应用启动和关闭时执行的生命周期逻辑。"""
 
     init_db()
-    # 应用启动时顺带启动元数据后台同步线程。
+    cleanup_temp_files()
     metadata_sync.start()
     try:
         yield
     finally:
         metadata_sync.stop()
+        shutdown_browser()
 
 
 app = FastAPI(title="ATC A-2 Voice Module", version="1.0.0", lifespan=lifespan)

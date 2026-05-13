@@ -244,7 +244,11 @@ class DownloadTaskService:
             extension=source_file.suffix or ".wav",
             content=source_file.read_bytes(),
         )
-        self.voice_repo.insert_voice_record(record)
+        try:
+            self.voice_repo.insert_voice_record(record)
+        except Exception:
+            Path(record.file_path).unlink(missing_ok=True)
+            raise
         self.task_repo.update_download_progress(task_id, 100.0, 0, 1)
         return record.model_dump()
 

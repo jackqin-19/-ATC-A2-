@@ -391,12 +391,15 @@ class RealtimeConnectionManager:
             extension=extension,
             content=content,
         )
-        self.voice_repository.insert_voice_record(record)
+        try:
+            self.voice_repository.insert_voice_record(record)
+        except Exception:
+            Path(record.file_path).unlink(missing_ok=True)
+            raise
         task_state = self._receive_state.setdefault(
             int(task["task_id"]),
             {"segmentsSaved": 0, "lastSegmentAt": None, "lastError": None, "streamUrl": None},
         )
-        # 运行状态里额外记录已保存片段数和最后一次切片时间，便于展示。
         task_state["segmentsSaved"] = int(task_state.get("segmentsSaved", 0)) + 1
         task_state["lastSegmentAt"] = record.end_at
 

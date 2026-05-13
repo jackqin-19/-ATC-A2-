@@ -127,6 +127,16 @@ class VoiceRepository:
             ).fetchone()
         return dict(row) if row else None
 
+    def voice_record_exists_by_path(self, file_path: str) -> bool:
+        """检查指定路径的文件是否有对应的 DB 记录。"""
+
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM a2_voice_info WHERE file_path = ? LIMIT 1",
+                (file_path,),
+            ).fetchone()
+        return row is not None
+
     def list_voice_records(self) -> list[dict[str, Any]]:
         """列出全部语音记录，供同步任务全量扫描。"""
 
