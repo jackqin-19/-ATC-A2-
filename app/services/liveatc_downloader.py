@@ -120,20 +120,19 @@ class _BrowserLock:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._ref = 0
-
-    def acquire(self) -> None:
-        self._lock.acquire()
-        self._ref += 1
-
-    def release(self) -> None:
-        self._ref = max(0, self._ref - 1)
-        if hasattr(self._lock, "_is_owned") and self._lock._is_owned():
-            self._lock.release()
+        self._held = False
 
     @property
     def in_use(self) -> bool:
-        return self._ref > 0
+        return self._held
+
+    def __enter__(self) -> None:
+        self._lock.acquire()
+        self._held = True
+
+    def __exit__(self, *args: object) -> None:
+        self._held = False
+        self._lock.release()
 
 
 _browser_lock = _BrowserLock()
@@ -184,8 +183,7 @@ class ArchiveDownloader:
 
     @retry("fails to download archive audio file due to excessive max retry")
     def run(self) -> Path:
-        _browser_lock.acquire()
-        try:
+        with _browser_lock:
             with SB(uc=True) as sb:
                 sb.activate_cdp_mode(self.url)
                 _check_bypass_cloudflare(sb)
@@ -250,8 +248,6 @@ class ArchiveDownloader:
                 if mp3_download_path.exists():
                     mp3_download_path.unlink()
                 raise ATCAbortError("aborts archive downloading")
-        finally:
-            _browser_lock.release()
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -289,8 +285,7 @@ class StreamDownloader:
         self.stop_event = threading.Event()
 
     def resolve_stream_url(self) -> tuple[str, dict[str, str], dict[str, str]]:
-        _browser_lock.acquire()
-        try:
+        with _browser_lock:
             with SB(uc=True) as sb:
                 sb.activate_cdp_mode(self.url)
                 _check_bypass_cloudflare(sb)
@@ -301,8 +296,6 @@ class StreamDownloader:
                 cookies = {c["name"]: c["value"] for c in cookies_dict}
                 user_agent = sb.get_user_agent()
                 referer = sb.get_current_url()
-        finally:
-            _browser_lock.release()
         headers = {
             "User-Agent": user_agent,
             "Referer": referer,
